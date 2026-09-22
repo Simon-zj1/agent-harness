@@ -64,3 +64,6 @@
 | git fetch/rebase 失败 | 回到同步前状态，用本地副本继续，标记 degraded |
 | 渲染失败或产物缺失 | 标记 degraded，不发布 |
 | 推送失败 | failed + 通知（产物已在本地） |
+
+> 站点仓库走 SSH 别名（`git@github-simonzj1:...`）而不是 `origin`：本机网络会挡
+> github.com 的 HTTPS，SSH 与 api.github.com 正常。换机器时改 `task.toml` 的 `[publish] remote` 即可。
