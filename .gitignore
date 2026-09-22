@@ -1,0 +1,8 @@
+# Runtime state (regenerate with ./agent run; memory/notes is the part worth keeping)
+runs/
+memory/index.db
+memory/runs/
+__pycache__/
+*.pyc
+.venv/
+.DS_Store

@@ -1,0 +1,94 @@
+name = "daily-trends"
+title = "每日技术趋势 · 发布"
+description = "抓取当日行业热点与 GitHub 热门仓库，撰写中英双语内容，渲染并发布到个人网站。"
+date_mode = "today"
+timezone = "Asia/Shanghai"
+
+# Two locks: one for the task itself, one for the site repo. The site lock is
+# what keeps a manual run and the scheduled run from writing the same checkout.
+lock_scope = ["task", "site"]
+
+allowed_tools = [
+  "fs_read", "fs_write", "fs_list", "fs_exists",
+  "shell_run", "http_get", "http_probe", "notify",
+  "codex_exec", "claude_exec",
+]
+
+readable_paths = ["{tools_dir}", "{site_repo}", "{blog_repo}"]
+writable_paths = ["{tools_dir}/data", "{site_repo}", "{blog_repo}/source/tech"]
+
+[paths]
+tools_dir = "/Users/simon-zj/Documents/ChatGPT/daily-trends"
+site_repo = "/Users/simon-zj/Documents/ChatGPT/个人网站"
+blog_repo = "/Users/simon-zj/blog"
+
+[context]
+# What `--compose` defaults to for unattended runs.
+compose_default = "llm"
+provider = "deepseek"
+prompt_dir = "prompts"
+# Repair rounds if the model returns content that fails structure checks.
+repair_rounds = 1
+
+[publish]
+# Safety default: a manual run never pushes unless you pass --publish.
+default_enabled = false
+remote = "origin"
+branch = "main"
+commit_message = "Daily trends: {date}"
+add = ["trends", "css/trends.css", "tech/index.html", "sitemap.xml"]
+
+[trigger]
+type = "launchd"
+label = "com.simonzj.agent.daily-trends"
+publish = true
+calendar = [{ hour = 23, minute = 0 }]
+
+[[steps]]
+id = "sync-site"
+command = ["python3", "steps/15_sync_site.py"]
+skip_on_dry_run = true
+retries = 1
+note = "把站点仓库同步到远端，避免在过期副本上渲染"
+
+[[steps]]
+id = "fetch"
+command = ["python3", "steps/10_fetch.py"]
+allow_degrade = true
+timeout_sec = 1500
+note = "抓取当日 raw 数据；代理或额度不可用时降级"
+
+[[steps]]
+id = "compose"
+command = ["python3", "steps/20_compose.py"]
+timeout_sec = 2400
+note = "撰写中英双语内容（replay / llm / delegate）"
+
+[[steps]]
+id = "render"
+command = ["python3", "steps/30_render.py"]
+note = "归一化引用并渲染页面；dry-run 只产出预览"
+
+[[steps]]
+id = "publish"
+command = ["python3", "steps/40_publish.py"]
+when = "validation_passed"
+requires_publish = true
+note = "校验全部通过后才提交并推送站点仓库"
+
+[[validators]]
+name = "daily_trends_structure"
+args = { path = "{run_dir}/content.json" }
+
+[[validators]]
+name = "daily_trends_references"
+args = { path = "{run_dir}/content.json" }
+
+[[validators]]
+name = "daily_trends_verifiable"
+args = { content_path = "{run_dir}/content.json", raw_path = "{tools_dir}/data/raw/{date}.json" }
+
+# 生成物漂移闸门：站点仓库里的 sitemap 必须始终可解析、无重复 URL、不累积空行。
+[[validators]]
+name = "sitemap_sane"
+args = { path = "{site_repo}/sitemap.xml" }

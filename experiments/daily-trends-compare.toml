@@ -1,0 +1,51 @@
+name = "daily-trends-compare"
+task = "daily-trends"
+description = """
+同一批真实数据（某个日期的 raw 抓取结果）跑多条路线，比较产出质量、可核验率、
+token 成本与耗时。replay 臂离线可跑；llm 臂需要 --allow-llm；delegate 臂需要执行器。
+"""
+
+# 所有臂默认跳过会写共享状态的步骤：实验跑在已抓取的 raw 上，保证各臂输入一致，
+# 也不碰站点仓库。若某个臂需要现场抓取，显式写 skip_steps = []。
+skip_steps = ["sync-site", "fetch", "publish"]
+
+[[arms]]
+name = "harness-replay"
+description = "自建 harness，复用当天既有内容 —— 确定性基线，用来验证管线本身"
+compose_mode = "replay"
+
+[[arms]]
+name = "harness-llm-full"
+description = "自建 harness + DeepSeek，全量 raw 上下文"
+compose_mode = "llm"
+context_strategy = "full"
+requires = ["llm"]
+
+[[arms]]
+name = "harness-llm-prefilter"
+description = "自建 harness + DeepSeek，预筛后的上下文（更省 token）"
+compose_mode = "llm"
+context_strategy = "prefilter"
+requires = ["llm"]
+
+[[arms]]
+name = "harness-llm-prefilter-memory"
+description = "在预筛上下文之上注入本机记忆（notes + 既往运行）"
+compose_mode = "llm"
+context_strategy = "prefilter"
+memory_enabled = true
+requires = ["llm"]
+
+[[arms]]
+name = "codex-exec"
+description = "整件事交给 Codex CLI（托管基线）"
+compose_mode = "delegate"
+executor = "codex"
+requires = ["executor"]
+
+[[arms]]
+name = "claude-exec"
+description = "整件事交给 Claude Code（第二个托管基线）"
+compose_mode = "delegate"
+executor = "claude"
+requires = ["executor"]

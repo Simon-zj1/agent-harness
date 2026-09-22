@@ -1,0 +1,18 @@
+#!/usr/bin/env bash
+# Entry point for the local agent harness.
+#
+#   ./agent run daily-trends --date 2026-09-22 --dry-run
+#   ./agent status
+#   ./agent doctor
+#
+# Everything mutable (memory/, runs/) lives under AGENT_HOME (default: this repo).
+set -euo pipefail
+
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+export AGENT_REPO_ROOT="${AGENT_REPO_ROOT:-$HERE}"
+export PYTHONPATH="$HERE${PYTHONPATH:+:$PYTHONPATH}"
+export PYTHONUNBUFFERED=1
+export LC_ALL="${LC_ALL:-en_US.UTF-8}"
+
+PY="${AGENT_PYTHON:-python3}"
+exec "$PY" -m harness.cli "$@"

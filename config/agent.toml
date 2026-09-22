@@ -1,0 +1,61 @@
+# Local agent harness configuration.
+#
+# Secrets never live here: each provider names the environment variable that
+# holds its key, and ~/.codex/.env is used as a fallback source.
+
+[runtime]
+default_provider = "deepseek"
+default_executor = "codex"
+# Commands that dry-run must not execute.
+mutating_commands = ["git", "rm", "rsync", "cp", "mkdir", "touch"]
+
+[budget]
+run_timeout_sec = 5400
+step_timeout_sec = 1800
+step_retries = 1
+
+[notify]
+enabled = true
+macos = true
+webhook = ""
+# failure | always
+on = "failure"
+
+[providers.deepseek]
+type = "openai_compat"
+base_url = "https://api.deepseek.com/v1"
+model = "deepseek-chat"
+api_key_env = "DEEPSEEK_API_KEY"
+timeout_sec = 300
+max_retries = 2
+temperature = 0.3
+# Prices are deliberately unset: token counts are always recorded, money is only
+# reported once you fill in your real unit prices.
+# input_per_mtok = 0.0
+# output_per_mtok = 0.0
+
+# Local model adapter (not used by default). M1 Pro / 16 GB realistically tops
+# out around 7-14B quantised models, so this is for offline or sensitive runs.
+[providers.local]
+type = "openai_compat"
+base_url = "http://127.0.0.1:11434/v1"
+model = "qwen3:8b"
+api_key_env = "LOCAL_API_KEY"
+enabled = false
+
+[executors.codex]
+command = "codex"
+sandbox = "workspace-write"
+ephemeral = true
+timeout_sec = 3600
+
+[executors.claude]
+command = "claude"
+permission_mode = "acceptEdits"
+timeout_sec = 3600
+
+[tools.shell]
+allowlist = [
+  "python3", "git", "curl", "ls", "cp", "mkdir", "rm", "touch", "cat", "sed",
+  "grep", "osascript", "codex", "claude", "plutil", "launchctl", "date", "rsync",
+]
