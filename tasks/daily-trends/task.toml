@@ -18,9 +18,11 @@ readable_paths = ["{tools_dir}", "{site_repo}", "{blog_repo}"]
 writable_paths = ["{tools_dir}/data", "{site_repo}", "{blog_repo}/source/tech"]
 
 [paths]
-tools_dir = "/Users/simon-zj/Documents/ChatGPT/daily-trends"
-site_repo = "/Users/simon-zj/Documents/ChatGPT/个人网站"
-blog_repo = "/Users/simon-zj/blog"
+# Author-local defaults; every path can be overridden without editing this file:
+#   export DAILY_TRENDS_DIR=... SITE_REPO_DIR=... BLOG_REPO_DIR=...
+tools_dir = "${DAILY_TRENDS_DIR:-/Users/simon-zj/Documents/ChatGPT/daily-trends}"
+site_repo = "${SITE_REPO_DIR:-/Users/simon-zj/Documents/ChatGPT/个人网站}"
+blog_repo = "${BLOG_REPO_DIR:-/Users/simon-zj/blog}"
 
 [context]
 # What `--compose` defaults to for unattended runs.

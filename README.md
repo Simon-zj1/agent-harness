@@ -97,3 +97,11 @@ scripts/install_launchd.sh daily-trends --load                      # 交给 lau
 
 `config/agent.toml`：默认 provider/executor、预算、通知、命令白名单、执行器参数。
 密钥从环境变量读取，回退 `~/.codex/.env`；本仓库任何文件都不存明文密钥。
+
+任务里的本机路径写成 `${VAR:-默认值}`，换机器不用改文件：
+
+```bash
+export DAILY_TRENDS_DIR=/path/to/daily-trends
+export SITE_REPO_DIR=/path/to/your-site
+export BLOG_REPO_DIR=/path/to/hexo-source
+```

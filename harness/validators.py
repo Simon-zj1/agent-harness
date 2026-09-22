@@ -280,7 +280,10 @@ def sitemap_sane(
     path: str | Path,
     *,
     max_bytes: int = 200_000,
-    max_blank_run: int = 2,
+    # A freshly generated Hexo sitemap legitimately contains a run of 4
+    # whitespace-only lines before </urlset>; the drift we guard against grows
+    # without bound, so the threshold sits well above the baseline.
+    max_blank_run: int = 8,
     name: str = "sitemap_sane",
 ) -> dict[str, Any]:
     """Catch generated-file drift before it gets committed and pushed.

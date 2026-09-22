@@ -35,6 +35,26 @@ class TaskSpecTests(unittest.TestCase):
             f"{self.work}/2026-09-22.json",
         )
 
+    def test_env_placeholders_keep_paths_portable(self) -> None:
+        import os
+
+        self.assertEqual(
+            taskspec.render("${NOPE_DIR:-/tmp/fallback}", date="2026-09-22"),
+            "/tmp/fallback",
+        )
+        os.environ["HARNESS_TEST_DIR"] = "/tmp/explicit"
+        try:
+            self.assertEqual(
+                taskspec.render("${HARNESS_TEST_DIR:-/tmp/fallback}", date="2026-09-22"),
+                "/tmp/explicit",
+            )
+            self.assertEqual(
+                taskspec.render("${HARNESS_TEST_DIR}/data/{date}.json", date="2026-09-22"),
+                "/tmp/explicit/data/2026-09-22.json",
+            )
+        finally:
+            os.environ.pop("HARNESS_TEST_DIR", None)
+
     def test_unknown_task_raises(self) -> None:
         with self.assertRaises(Exception):
             taskspec.load("nope")

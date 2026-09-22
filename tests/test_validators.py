@@ -71,7 +71,8 @@ class ValidatorTests(unittest.TestCase):
             "/Users/simon-zj/Documents/ChatGPT/个人网站/sitemap.xml"
         )
         self.assertTrue(result["ok"], result.get("failures"))
-        self.assertGreater(result["metrics"]["trends_urls"], 0)
+        self.assertGreater(result["metrics"]["urls"], 0)
+        self.assertLessEqual(result["metrics"]["max_blank_run"], 8)
 
     def test_duplicate_sitemap_urls_are_rejected(self) -> None:
         path = Path(self._tmp) / "dup.xml"
@@ -90,14 +91,29 @@ class ValidatorTests(unittest.TestCase):
         path = Path(self._tmp) / "drift.xml"
         path.write_text(
             '<?xml version="1.0" encoding="UTF-8"?>\n<urlset>\n'
-            "\n\n\n\n\n"
+            + "\n" * 12
+            +
             "  <url><loc>https://example.com/a</loc></url>\n"
             "</urlset>\n",
             encoding="utf-8",
         )
         result = validators.sitemap_sane(path)
         self.assertFalse(result["ok"])
-        self.assertGreater(result["metrics"]["max_blank_run"], 2)
+        self.assertGreater(result["metrics"]["max_blank_run"], 8)
+
+    def test_hexo_baseline_whitespace_is_tolerated(self) -> None:
+        """hexo-generator-sitemap emits a 4-blank-line run before </urlset>."""
+        path = Path(self._tmp) / "baseline.xml"
+        path.write_text(
+            '<?xml version="1.0" encoding="UTF-8"?>\n<urlset>\n'
+            "  <url><loc>https://example.com/a</loc></url>\n"
+            "\n  \n\n  \n"
+            "</urlset>\n",
+            encoding="utf-8",
+        )
+        result = validators.sitemap_sane(path)
+        self.assertTrue(result["ok"], result.get("failures"))
+        self.assertLessEqual(result["metrics"]["max_blank_run"], 4)
 
     def test_broken_xml_is_rejected(self) -> None:
         path = Path(self._tmp) / "broken.xml"

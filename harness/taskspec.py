@@ -6,6 +6,8 @@ TOML is the canonical format: the harness stays standard-library only, and
 
 from __future__ import annotations
 
+import os
+import re
 import tomllib
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -84,12 +86,31 @@ def render(
     run_dir: Path | None = None,
     extra: dict[str, Any] | None = None,
 ) -> str:
-    text = template.replace("{date}", date)
+    text = _expand_env(template)
+    text = text.replace("{date}", date)
     if run_dir is not None:
         text = text.replace("{run_dir}", str(run_dir))
     for key, value in (extra or {}).items():
-        text = text.replace("{" + str(key) + "}", str(value))
+        # Values from a task's [paths] table may themselves be env-templated.
+        text = text.replace("{" + str(key) + "}", _expand_env(str(value)))
     return text
+
+
+_ENV_PATTERN = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)(?::-([^}]*))?\}")
+
+
+def _expand_env(text: str) -> str:
+    """Expand `${VAR}` and `${VAR:-default}` so paths stay portable.
+
+    Task files can then ship author defaults while any machine overrides them:
+        tools_dir = "${DAILY_TRENDS_DIR:-/Users/me/daily-trends}"
+    """
+
+    def replace(match: re.Match[str]) -> str:
+        name, default = match.group(1), match.group(2)
+        return os.environ.get(name, default if default is not None else "")
+
+    return _ENV_PATTERN.sub(replace, text)
 
 
 def load(name_or_dir: str | Path, *, root: Path | None = None) -> TaskSpec:
