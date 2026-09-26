@@ -152,6 +152,27 @@ scripts/install_launchd.sh daily-trends --load                      # 交给 lau
 测试里用「永远放行」和「永远拒绝」两个假校验器做了反向对照，确认探针能识别出坏闸门，
 否则探针只是装饰。
 
+### 被拦下之后：修复简报
+
+闸门只说「不行」等于把问题丢回给人。类型化结果里本来就带着证据和修复建议，
+所以被拦下的运行会写出 `runs/<run_id>/validation-failures.json`，`agent report`
+也会直接打印：
+
+```
+$ ./agent report 2026-09-22-daily-trends-141800-ff91b7
+被拦下：1 个校验器未通过
+  · daily_trends_verifiable  decision=fail class=fabricated_source
+    28/47 cited references trace back to the raw capture (cannot_verify=0, fail=19)
+      - ref#1 https://arxiv.org/abs/2609.24974v1  no fetched url matches
+      - ref#2 https://arxiv.org/abs/2609.24972v1  no fetched url matches
+      … 另有 14 条，见 validation-failures.json
+    修复建议：Re-fetch the cited page, or replace the citation with a URL that is present in the raw capture.
+```
+
+`decision`、`failure_class`、逐条 `evidence`（哪一条引用、哪个 URL、为什么）都会
+写进台账并持久化，所以一次失败是可复查、可交接、可被后续修复步骤消费的，而不是
+一句 exit 1。
+
 要自己复现这三行：
 
 ```bash

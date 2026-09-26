@@ -220,6 +220,39 @@ def combine(results: Iterable[dict[str, Any]]) -> dict[str, Any]:
     }
 
 
+def repair_brief(results: Iterable[dict[str, Any]]) -> dict[str, Any]:
+    """Turn a blocked run into something actionable.
+
+    A gate that only says "no" leaves the operator to reverse-engineer which
+    claim broke and what to do about it. The typed result already carries the
+    receipts (evidence) and the fix (remediation) — this collects them into one
+    machine-readable brief so a human or a repair step has somewhere to start.
+    """
+    entries: list[dict[str, Any]] = []
+    for result in results:
+        if result.get("ok"):
+            continue
+        raw = result.get("decision")
+        decision = raw if raw is not None else Decision.FAIL.value
+        entries.append(
+            {
+                "validator": result.get("name", "?"),
+                "decision": decision,
+                "failure_class": result.get("failure_class"),
+                "detail": result.get("detail", ""),
+                "remediation": result.get("remediation"),
+                "policy_action": result.get("policy_action"),
+                "evidence": result.get("evidence", []),
+                "metrics": result.get("metrics", {}),
+            }
+        )
+    return {
+        "blocking": [entry["validator"] for entry in entries],
+        "count": len(entries),
+        "entries": entries,
+    }
+
+
 # ---------------------------------------------------------------------------
 # Ground-truth URL matching
 #
@@ -362,6 +395,7 @@ __all__ = [
     "evidence",
     "apply_policy",
     "combine",
+    "repair_brief",
     "canonical_url",
     "classify_url",
 ]

@@ -112,6 +112,7 @@ CREATE TABLE IF NOT EXISTS validations (
     failure_class TEXT,
     evidence_json TEXT,
     policy_action TEXT,
+    remediation TEXT,
     PRIMARY KEY (run_id, name)
 );
 """
@@ -122,6 +123,7 @@ _VALIDATION_MIGRATIONS: tuple[tuple[str, str], ...] = (
     ("failure_class", "TEXT"),
     ("evidence_json", "TEXT"),
     ("policy_action", "TEXT"),
+    ("remediation", "TEXT"),
 )
 
 
@@ -423,14 +425,15 @@ class Ledger:
             """
             INSERT INTO validations (
                 run_id, name, ok, detail, metrics_json, failures_json,
-                decision, failure_class, evidence_json, policy_action
+                decision, failure_class, evidence_json, policy_action, remediation
             )
-            VALUES (?,?,?,?,?,?,?,?,?,?)
+            VALUES (?,?,?,?,?,?,?,?,?,?,?)
             ON CONFLICT(run_id, name) DO UPDATE SET
                 ok=excluded.ok, detail=excluded.detail,
                 metrics_json=excluded.metrics_json, failures_json=excluded.failures_json,
                 decision=excluded.decision, failure_class=excluded.failure_class,
-                evidence_json=excluded.evidence_json, policy_action=excluded.policy_action
+                evidence_json=excluded.evidence_json, policy_action=excluded.policy_action,
+                remediation=excluded.remediation
             """,
             (
                 run_id,
@@ -443,6 +446,7 @@ class Ledger:
                 result.get("failure_class"),
                 json.dumps(result.get("evidence", []), ensure_ascii=False),
                 result.get("policy_action"),
+                result.get("remediation"),
             ),
         )
         self._conn.commit()

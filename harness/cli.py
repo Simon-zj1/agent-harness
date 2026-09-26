@@ -346,6 +346,23 @@ def cmd_report(args: argparse.Namespace) -> int:
                 f"  - validator {result['name']}: {'ok' if result.get('ok') else 'FAIL'} "
                 f"{result.get('metrics', {})}"
             )
+        blocked = [r for r in row.validators if not r.get("ok")]
+        if blocked:
+            log.error("")
+            log.error(f"被拦下：{len(blocked)} 个校验器未通过")
+            for result in blocked:
+                decision = result.get("decision") or ("fail" if not result.get("ok") else "—")
+                failure_class = result.get("failure_class") or "—"
+                log.error(f"  · {result['name']}  decision={decision} class={failure_class}")
+                log.error(f"    {result.get('detail', '')}")
+                for item in (result.get("evidence") or [])[:5]:
+                    where = item.get("url") or item.get("ref") or ""
+                    log.error(f"      - {item.get('ref', '')} {where}  {item.get('detail', '')}")
+                extra = len(result.get("evidence") or []) - 5
+                if extra > 0:
+                    log.error(f"      … 另有 {extra} 条，见 validation-failures.json")
+                if result.get("remediation"):
+                    log.error(f"    修复建议：{result['remediation']}")
         if row.outputs:
             log.info(f"  outputs: {json.dumps(row.outputs, ensure_ascii=False)[:400]}")
         if row.error:

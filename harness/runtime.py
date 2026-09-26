@@ -259,6 +259,14 @@ class Runner:
             # run blocked by something we could not verify?" without re-parsing
             # every validator payload.
             metrics["verification"] = decisions.combine(validation_results)
+            # A blocked run should leave behind something a human or a repair
+            # step can act on: which claim broke, the receipts, and the fix.
+            brief = decisions.repair_brief(validation_results)
+            if brief["count"]:
+                (run_dir / "validation-failures.json").write_text(
+                    json.dumps(brief, ensure_ascii=False, indent=2), encoding="utf-8"
+                )
+                metrics["blocking_validators"] = brief["blocking"]
             required_failed = [
                 result
                 for result, spec in zip(validation_results, task.validators)
