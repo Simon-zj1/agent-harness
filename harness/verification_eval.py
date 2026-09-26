@@ -31,6 +31,14 @@ KIND_LEGIT_DRIFT = "legit_drift"
 KIND_PREFIX_EXTENSION = "prefix_extension"
 KIND_FABRICATED_SUFFIX = "fabricated_suffix"
 KIND_UNRELATED = "unrelated"
+# A real URL from a *different* day's capture. The prefix is genuine and the
+# domain is trustworthy, so nothing about the string is obviously wrong — only
+# the scoping is. This is the attack that a naively-implemented gate misses.
+KIND_STALE_EVIDENCE = "stale_evidence"
+# A URL that really is in today's capture but that the article never cited.
+# It is a *should pass* sample: the gate can only prove provenance, and asking
+# it to prove that a source supports a claim is asking for something else.
+KIND_PLAUSIBLE_UNCITED = "plausible_uncited"
 
 EXPECT_PASS = "pass"
 EXPECT_NOT_PASS = "not_pass"
@@ -38,10 +46,17 @@ EXPECT_NOT_PASS = "not_pass"
 _KIND_EXPECT = {
     KIND_LEGIT: EXPECT_PASS,
     KIND_LEGIT_DRIFT: EXPECT_PASS,
+    KIND_PLAUSIBLE_UNCITED: EXPECT_PASS,
     KIND_PREFIX_EXTENSION: EXPECT_NOT_PASS,
     KIND_FABRICATED_SUFFIX: EXPECT_NOT_PASS,
+    KIND_STALE_EVIDENCE: EXPECT_NOT_PASS,
     KIND_UNRELATED: EXPECT_NOT_PASS,
 }
+
+# Classes that exist to bound the claim, not to score it. They are accounted for
+# normally; the report calls them out so nobody reads a green number as
+# "every citation is supported".
+_LIMIT_KINDS = (KIND_PLAUSIBLE_UNCITED,)
 
 
 @dataclass
@@ -95,6 +110,18 @@ def _cited_reference_urls(day: str, *, root: Path | None = None) -> list[str]:
     return urls
 
 
+def _path_of(canonical: str) -> str:
+    """Canonical URL with the query stripped.
+
+    Used when labelling cross-day negatives. The check must be *independent* of
+    the matcher under test — calling classify_url here would make the corpus
+    agree with the matcher by construction and no leak could ever be found. It
+    is also deliberately conservative: if the same path is already in today's
+    capture, the sample is not a valid negative and gets dropped.
+    """
+    return canonical.split("?", 1)[0]
+
+
 def _drift_scheme(url: str) -> str:
     if url.startswith("https://"):
         return url.replace("https://", "http://", 1)
@@ -142,17 +169,25 @@ def build_corpus(
     max_per_kind_per_day: int = 25,
 ) -> dict[str, Any]:
     """Build a labelled corpus. Deterministic: same inputs, same corpus."""
-    samples: list[Sample] = []
-    used_days: list[str] = []
-
+    base = root or data_dir()
+    known_by_day: dict[str, set[str]] = {}
+    cited_by_day: dict[str, list[str]] = {}
     for day in days:
-        base = root or data_dir()
-        if not (base / f"{day}.json").is_file() or not (base / "raw" / f"{day}.json").is_file():
+        if not (base / f"{day}.json").is_file() or not (
+            base / "raw" / f"{day}.json"
+        ).is_file():
             continue
-        known = _raw_urls(day, root=root)
-        used_days.append(day)
+        known_by_day[day] = _raw_urls(day, root=root)
+        cited_by_day[day] = _cited_reference_urls(day, root=root)
 
-        legit = [u for u in _cited_reference_urls(day, root=root) if canonical_url(u) in known]
+    samples: list[Sample] = []
+    used_days = list(known_by_day)
+
+    for day, known in known_by_day.items():
+
+        legit = [u for u in cited_by_day[day] if canonical_url(u) in known]
+        cited_here = {canonical_url(u) for u in legit}
+        known_paths = {_path_of(u) for u in known}
         for index, url in enumerate(legit[:max_per_kind_per_day]):
             samples.append(
                 Sample(
@@ -232,6 +267,50 @@ def build_corpus(
                     day=day,
                     expect=EXPECT_NOT_PASS,
                     note="no relationship to the capture at all",
+                )
+            )
+
+        # Real citation, wrong capture. Nothing about the URL is fabricated —
+        # the domain, the path and the article all exist — only the day is wrong.
+        stale_pool: list[tuple[str, str]] = []
+        seen_stale: set[str] = set()
+        for other in used_days:
+            if other == day:
+                continue
+            for url in cited_by_day[other]:
+                canonical = canonical_url(url)
+                if canonical in known or canonical in cited_here:
+                    continue
+                if _path_of(canonical) in known_paths:
+                    continue
+                if canonical in seen_stale:
+                    continue
+                seen_stale.add(canonical)
+                stale_pool.append((url, other))
+        for index, (url, other) in enumerate(stale_pool[:max_per_kind_per_day]):
+            samples.append(
+                Sample(
+                    sample_id=f"{day}-stale-{index:03d}",
+                    kind=KIND_STALE_EVIDENCE,
+                    url=url,
+                    day=day,
+                    expect=EXPECT_NOT_PASS,
+                    note=f"genuinely cited on {other}, but not fetched on {day}",
+                )
+            )
+
+        # Real URL from today that the article never used. The gate passes these
+        # by design; they exist to put a number on what provenance cannot prove.
+        uncited = sorted(u for u in known if u not in cited_here)
+        for index, canonical in enumerate(uncited[:max_per_kind_per_day]):
+            samples.append(
+                Sample(
+                    sample_id=f"{day}-uncited-{index:03d}",
+                    kind=KIND_PLAUSIBLE_UNCITED,
+                    url=f"https://{canonical}",
+                    day=day,
+                    expect=EXPECT_PASS,
+                    note="in today's capture but never cited by the article",
                 )
             )
 
@@ -453,11 +532,16 @@ def score(
         )
 
     total = len(verdicts)
+    limits = {
+        kind: sum(1 for s in corpus.get("samples", []) if s["kind"] == kind)
+        for kind in _LIMIT_KINDS
+    }
     return {
         "matcher": matcher_name,
         "samples": total,
         "attacks": attacks,
         "legit": legit,
+        "limit_samples": limits,
         "usage": dict(usage) if isinstance(usage, dict) else None,
         "false_pass_rate": round(attacks_passed / attacks, 4) if attacks else None,
         "false_pass_count": attacks_passed,
@@ -514,6 +598,27 @@ def markdown(report: dict[str, Any]) -> str:
             f"{'—' if cvr is None else f'{cvr:.1%}'} | "
             f"{entry['false_pass_count']}/{entry['attacks']} | {cost} |"
         )
+    # Aggregate rates depend on the class mix: adding a class that every matcher
+    # gets right dilutes the leak rate without anything improving. Per-kind is
+    # the number that cannot be gamed that way.
+    kinds = sorted({kind for entry in report["matchers"] for kind in entry["per_kind"]})
+    if kinds:
+        lines += [
+            "",
+            "### 分类别判决（避免用易样本稀释总漏检率）",
+            "",
+            "| matcher | " + " | ".join(kinds) + " |",
+            "| --- | " + " | ".join("---" for _ in kinds) + " |",
+        ]
+        for entry in report["matchers"]:
+            cells = []
+            for kind in kinds:
+                bucket = entry["per_kind"].get(kind, {})
+                cells.append(
+                    ", ".join(f"{name}×{count}" for name, count in sorted(bucket.items()))
+                    or "—"
+                )
+            lines.append(f"| {entry['matcher']} | " + " | ".join(cells) + " |")
     lines += [
         "",
         "## 口径",
@@ -525,9 +630,91 @@ def markdown(report: dict[str, Any]) -> str:
         "- `成本`：确定性 matcher 免费；LLM 裁判按实际 token 计费，未配置单价时只报 token。",
         "- 判决的**果断程度**与准确率同等重要：同样是 0% 漏检，24 次 `FAIL` 和 16 次",
         "  `CANNOT_VERIFY` 对下游是完全不同的负担。",
+        "- `plausible_uncited` 是**天花板样本**：URL 确实在当天抓取里、文章却从未引用它。",
+        "  闸门判 PASS 是正确的——它证明的是 provenance（来源确实被抓到过），不是 support",
+        "  （来源支撑了那句话）。要证明 support 需要另一层，不在本闸门的能力范围内。",
         "",
     ]
     return "\n".join(lines)
+
+
+BASELINE_VERSION = 1
+
+# Both directions are failures, and both are worse when they go up. A leak lets
+# a fabricated source through; a false reject blocks a real one.
+_REGRESSION_METRICS = ("false_pass_rate", "false_fail_rate")
+
+
+def default_baseline_path() -> Path:
+    from . import paths
+
+    return paths.runs_dir() / "verification" / "baseline.json"
+
+
+def baseline_from(report: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "version": BASELINE_VERSION,
+        "generated_at": dt.datetime.now().astimezone().isoformat(timespec="seconds"),
+        "samples": report.get("samples"),
+        "days": report.get("days"),
+        "matchers": {
+            entry["matcher"]: {
+                metric: entry.get(metric) for metric in _REGRESSION_METRICS
+            }
+            for entry in report.get("matchers", [])
+        },
+    }
+
+
+def check_baseline(
+    report: dict[str, Any], baseline: dict[str, Any]
+) -> dict[str, Any]:
+    """Compare a fresh report against a frozen one.
+
+    Guards the failure mode this whole module exists to prevent: a gate that
+    quietly gets worse while every test still passes.
+    """
+    regressions: list[dict[str, Any]] = []
+    for entry in report.get("matchers", []):
+        name = entry["matcher"]
+        recorded = (baseline.get("matchers") or {}).get(name)
+        if not recorded:
+            continue
+        for metric in _REGRESSION_METRICS:
+            now, before = entry.get(metric), recorded.get(metric)
+            if now is None or before is None:
+                continue
+            if now > before + 1e-9:
+                regressions.append(
+                    {
+                        "matcher": name,
+                        "metric": metric,
+                        "baseline": before,
+                        "now": now,
+                    }
+                )
+    return {
+        "ok": not regressions,
+        "regressions": regressions,
+        "compared_matchers": sorted(
+            set(baseline.get("matchers") or {})
+            & {entry["matcher"] for entry in report.get("matchers", [])}
+        ),
+    }
+
+
+def save_baseline(path: str | Path, report: dict[str, Any]) -> Path:
+    target = Path(path)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(
+        json.dumps(baseline_from(report), ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+    return target
+
+
+def load_baseline(path: str | Path) -> dict[str, Any]:
+    return _load_json(Path(path))
 
 
 __all__ = [
@@ -543,4 +730,9 @@ __all__ = [
     "score",
     "compare_matchers",
     "markdown",
+    "baseline_from",
+    "check_baseline",
+    "save_baseline",
+    "load_baseline",
+    "default_baseline_path",
 ]

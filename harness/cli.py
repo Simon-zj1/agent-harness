@@ -200,6 +200,11 @@ def build_parser() -> argparse.ArgumentParser:
     )
     v_eval.add_argument("--allow-llm", action="store_true", help="allow the paid llm-judge baseline")
     v_eval.add_argument("--llm-sample", type=int, default=40, help="cap samples sent to the judge")
+    v_eval.add_argument(
+        "--update-baseline",
+        action="store_true",
+        help="freeze this run as the regression baseline instead of comparing against it",
+    )
     v_eval.set_defaults(_handler=cmd_verify_eval)
     return parser
 
@@ -630,6 +635,28 @@ def cmd_verify_eval(args: argparse.Namespace) -> int:
             else f"  - {entry['matcher']:<8} 样本不足"
         )
     log.info(f"report: {outdir / 'report.md'}")
+
+    baseline_path = verification_eval.default_baseline_path()
+    if args.update_baseline:
+        verification_eval.save_baseline(baseline_path, report)
+        log.info(f"baseline updated: {baseline_path}")
+    elif baseline_path.is_file():
+        verdict = verification_eval.check_baseline(
+            report, verification_eval.load_baseline(baseline_path)
+        )
+        if verdict["compared_matchers"]:
+            if verdict["ok"]:
+                log.info(
+                    "baseline: no regression vs "
+                    + ", ".join(verdict["compared_matchers"])
+                )
+            else:
+                for item in verdict["regressions"]:
+                    log.error(
+                        f"regression: {item['matcher']}.{item['metric']} "
+                        f"{item['baseline']:.4f} -> {item['now']:.4f}"
+                    )
+                return EXIT_FAIL
     return EXIT_OK
 
 

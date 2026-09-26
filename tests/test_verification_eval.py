@@ -59,11 +59,34 @@ class CorpusTests(unittest.TestCase):
             {
                 ve.KIND_LEGIT,
                 ve.KIND_LEGIT_DRIFT,
+                ve.KIND_PLAUSIBLE_UNCITED,
                 ve.KIND_PREFIX_EXTENSION,
                 ve.KIND_FABRICATED_SUFFIX,
+                ve.KIND_STALE_EVIDENCE,
                 ve.KIND_UNRELATED,
             },
         )
+
+    def test_stale_evidence_really_is_absent_from_its_day(self) -> None:
+        """A cross-day negative must not be traceable under any equivalence."""
+        stale = [s for s in self.corpus["samples"] if s["kind"] == ve.KIND_STALE_EVIDENCE]
+        self.assertTrue(stale)
+        for sample in stale:
+            known = ve._raw_urls(sample["day"])
+            with self.subTest(sample=sample["sample_id"]):
+                self.assertNotIn(canonical_url(sample["url"]), known)
+                self.assertNotIn(ve._path_of(canonical_url(sample["url"])), {ve._path_of(u) for u in known})
+
+    def test_plausible_uncited_really_is_in_its_day(self) -> None:
+        """The ceiling class must be genuinely traceable, or it proves nothing."""
+        uncited = [
+            s for s in self.corpus["samples"] if s["kind"] == ve.KIND_PLAUSIBLE_UNCITED
+        ]
+        self.assertTrue(uncited)
+        for sample in uncited:
+            known = ve._raw_urls(sample["day"])
+            with self.subTest(sample=sample["sample_id"]):
+                self.assertIn(canonical_url(sample["url"]), known)
 
     def test_labelled_positives_really_are_in_the_capture(self) -> None:
         """A 'should pass' sample that is not actually fetched would be a lie."""
@@ -181,6 +204,24 @@ class MatcherComparisonTests(unittest.TestCase):
         }
         self.assertEqual(uncertain_kinds, {ve.KIND_PREFIX_EXTENSION, ve.KIND_FABRICATED_SUFFIX})
 
+    def test_stale_evidence_gets_a_definite_fail_not_a_shrug(self) -> None:
+        """Wrong-day evidence is not ambiguous: it is simply not in the capture."""
+        stale = [
+            v
+            for v in self.typed["verdicts"]
+            if v["kind"] == ve.KIND_STALE_EVIDENCE
+        ]
+        self.assertTrue(stale)
+        self.assertTrue(all(v["verdict"] == "fail" for v in stale), stale[:3])
+
+    def test_the_report_states_what_provenance_cannot_prove(self) -> None:
+        """The ceiling class has to be visible, or a green number overclaims."""
+        report = ve.compare_matchers(self.corpus, {"typed": ve.typed_matcher})
+        entry = report["matchers"][0]
+        self.assertGreater(entry["limit_samples"][ve.KIND_PLAUSIBLE_UNCITED], 0)
+        text = ve.markdown(report)
+        self.assertIn("provenance", text.lower() + text)
+
     def test_report_renders_both_matchers(self) -> None:
         report = ve.compare_matchers(
             self.corpus, {"legacy": ve.legacy_matcher, "typed": ve.typed_matcher}
@@ -239,6 +280,74 @@ class CorpusSerialisationTests(unittest.TestCase):
             reloaded = ve.load_corpus(path)
         self.assertEqual(reloaded, corpus)
         self.assertEqual(json.loads(json.dumps(reloaded)), corpus)
+
+
+class BaselineRegressionTests(unittest.TestCase):
+    """A gate that quietly gets worse while every test passes is the failure
+    mode this whole module exists to prevent."""
+
+    @staticmethod
+    def _report(**matchers):
+        return {
+            "samples": 100,
+            "days": ["2026-09-25"],
+            "matchers": [
+                {"matcher": name, **metrics} for name, metrics in matchers.items()
+            ],
+        }
+
+    def test_identical_run_is_not_a_regression(self) -> None:
+        report = self._report(typed={"false_pass_rate": 0.0, "false_fail_rate": 0.0})
+        baseline = ve.baseline_from(report)
+        self.assertTrue(ve.check_baseline(report, baseline)["ok"])
+
+    def test_a_leak_regression_is_caught(self) -> None:
+        baseline = ve.baseline_from(
+            self._report(typed={"false_pass_rate": 0.0, "false_fail_rate": 0.0})
+        )
+        worse = self._report(typed={"false_pass_rate": 0.05, "false_fail_rate": 0.0})
+        verdict = ve.check_baseline(worse, baseline)
+        self.assertFalse(verdict["ok"])
+        self.assertEqual(verdict["regressions"][0]["metric"], "false_pass_rate")
+        self.assertEqual(verdict["regressions"][0]["baseline"], 0.0)
+        self.assertEqual(verdict["regressions"][0]["now"], 0.05)
+
+    def test_a_false_reject_regression_is_also_caught(self) -> None:
+        """Improving leak rate by rejecting everything is not an improvement."""
+        baseline = ve.baseline_from(
+            self._report(typed={"false_pass_rate": 0.0, "false_fail_rate": 0.0})
+        )
+        worse = self._report(typed={"false_pass_rate": 0.0, "false_fail_rate": 0.9})
+        verdict = ve.check_baseline(worse, baseline)
+        self.assertFalse(verdict["ok"])
+        self.assertEqual(verdict["regressions"][0]["metric"], "false_fail_rate")
+
+    def test_an_improvement_is_not_a_regression(self) -> None:
+        baseline = ve.baseline_from(
+            self._report(legacy={"false_pass_rate": 0.6, "false_fail_rate": 0.0})
+        )
+        better = self._report(legacy={"false_pass_rate": 0.1, "false_fail_rate": 0.0})
+        self.assertTrue(ve.check_baseline(better, baseline)["ok"])
+
+    def test_matchers_absent_from_the_baseline_are_not_compared(self) -> None:
+        baseline = ve.baseline_from(
+            self._report(legacy={"false_pass_rate": 0.6, "false_fail_rate": 0.0})
+        )
+        only_new = self._report(llm={"false_pass_rate": 0.9, "false_fail_rate": 0.9})
+        verdict = ve.check_baseline(only_new, baseline)
+        self.assertTrue(verdict["ok"])
+        self.assertEqual(verdict["compared_matchers"], [])
+
+    def test_baseline_round_trips_through_disk(self) -> None:
+        import tempfile
+
+        report = self._report(typed={"false_pass_rate": 0.0, "false_fail_rate": 0.0})
+        with tempfile.TemporaryDirectory() as tmp:
+            path = ve.save_baseline(Path(tmp) / "baseline.json", report)
+            loaded = ve.load_baseline(path)
+        self.assertEqual(loaded["version"], ve.BASELINE_VERSION)
+        self.assertEqual(loaded["samples"], 100)
+        self.assertIn("typed", loaded["matchers"])
 
 
 if __name__ == "__main__":
