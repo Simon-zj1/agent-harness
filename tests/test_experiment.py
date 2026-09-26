@@ -4,7 +4,7 @@ import json
 import unittest
 
 from harness.experiment import load as load_experiment
-from harness.experiment import run_experiment
+from harness.experiment import pareto, run_experiment
 
 from .helpers import BODY_STEP, Sandbox, demo_task_body
 
@@ -78,6 +78,69 @@ requires = ["llm"]
         run_experiment(experiment, date="2026-09-22", allow_llm=False)
         canonical = self.work / "content.json"
         self.assertFalse(canonical.exists())
+
+
+def _arm(name: str, cost, tokens: int, ratio, validators_ok=True, compose="llm"):
+    return {
+        "arm": name,
+        "status": "degraded",
+        "cost_usd": cost,
+        "tokens_in": tokens,
+        "tokens_out": 0,
+        "verifiable_ratio": ratio,
+        "validators_ok": validators_ok,
+        "compose_mode": compose,
+    }
+
+
+class ParetoTests(unittest.TestCase):
+    def test_cheaper_and_stricter_dominates(self) -> None:
+        result = pareto(
+            [
+                _arm("cheap-strict", 0.01, 1000, 1.0),
+                _arm("expensive-loose", 0.50, 90000, 0.8),
+            ]
+        )
+        self.assertEqual(result["frontier"], ["cheap-strict"])
+        dominated = [p for p in result["points"] if p["arm"] == "expensive-loose"][0]
+        self.assertFalse(dominated["pareto_optimal"])
+
+    def test_trade_off_keeps_both_points(self) -> None:
+        result = pareto(
+            [
+                _arm("cheap-loose", 0.01, 1000, 0.7),
+                _arm("pricey-strict", 0.50, 90000, 1.0),
+            ]
+        )
+        self.assertEqual(sorted(result["frontier"]), ["cheap-loose", "pricey-strict"])
+
+    def test_falls_back_to_tokens_when_no_price_is_configured(self) -> None:
+        result = pareto(
+            [
+                _arm("no-price", None, 5000, 1.0),
+                _arm("also-no-price", None, 90000, 1.0),
+            ]
+        )
+        self.assertEqual(result["axis"], "tokens")
+        self.assertEqual(result["frontier"], ["no-price"])
+        self.assertTrue(any("token" in caveat for caveat in result["caveats"]))
+
+    def test_replay_arm_on_the_frontier_is_flagged_as_a_baseline(self) -> None:
+        result = pareto(
+            [
+                _arm("harness-replay", 0.0, 0, 1.0, compose="replay"),
+                _arm("harness-llm", 0.30, 90000, 1.0, compose="llm"),
+            ]
+        )
+        self.assertIn("harness-replay", result["frontier"])
+        self.assertTrue(
+            any("replay" in caveat for caveat in result["caveats"]),
+            result["caveats"],
+        )
+
+    def test_arms_without_a_score_are_skipped(self) -> None:
+        result = pareto([_arm("unknown", 0.1, 100, None, validators_ok=None)])
+        self.assertEqual(result["points"], [])
 
 
 if __name__ == "__main__":

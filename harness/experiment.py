@@ -136,6 +136,7 @@ def run_experiment(
         "generated_at": dt.datetime.now().astimezone().isoformat(timespec="seconds"),
         "arms": outcomes,
         "skipped": skipped,
+        "pareto": pareto(outcomes),
     }
     (outdir / "report.json").write_text(
         json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8"
@@ -147,10 +148,47 @@ def run_experiment(
     return report
 
 
-def compare(experiment_id_prefix: str, ledger: Ledger | None = None) -> dict[str, Any]:
+def compare(
+    experiment_id_prefix: str,
+    *,
+    ledger: Ledger | None = None,
+    write: bool = True,
+) -> dict[str, Any]:
+    """Rebuild a report from the ledger, without re-running the arms.
+
+    An experiment that already happened should not have to be paid for twice
+    just to draw the Pareto frontier.
+    """
     ledger = ledger or Ledger()
-    runs = ledger.list_runs(experiment=experiment_id_prefix, limit=200)
-    return {"runs": [_row_summary(row) for row in runs]}
+    runs = ledger.list_runs(experiment_prefix=experiment_id_prefix, limit=500)
+    outcomes = []
+    for row in runs:
+        arm = Arm(name=row.arm or row.run_id, compose_mode=row.compose_mode)
+        outcomes.append(_arm_summary(arm, row))
+
+    report = {
+        "experiment": experiment_id_prefix,
+        "experiment_id": f"{experiment_id_prefix}-replay",
+        "task": runs[0].task if runs else "",
+        "date": runs[0].target_date if runs else "",
+        "dry_run": bool(runs[0].dry_run) if runs else True,
+        "generated_at": dt.datetime.now().astimezone().isoformat(timespec="seconds"),
+        "arms": outcomes,
+        "skipped": [],
+        "source": "ledger",
+        "pareto": pareto(outcomes),
+    }
+    if write:
+        outdir = paths.runs_dir() / "experiments" / f"{experiment_id_prefix}-compare"
+        outdir.mkdir(parents=True, exist_ok=True)
+        (outdir / "report.json").write_text(
+            json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8"
+        )
+        (outdir / "report.md").write_text(_markdown(report), encoding="utf-8")
+        _write_csv(outdir / "report.csv", outcomes)
+        report["report_md"] = str(outdir / "report.md")
+        report["report_csv"] = str(outdir / "report.csv")
+    return report
 
 
 def _blocked_reason(arm: Arm, *, allow_llm: bool, allow_network: bool, dry_run: bool) -> str:
@@ -198,6 +236,111 @@ def _arm_summary(arm: Arm, run: RunRow) -> dict[str, Any]:
     }
 
 
+def _verification_score(arm: dict[str, Any]) -> float | None:
+    """How much of the acceptance gate this arm actually satisfied, in 0..1."""
+    ratio = arm.get("verifiable_ratio")
+    if isinstance(ratio, (int, float)):
+        return float(ratio)
+    if arm.get("validators_ok") is True:
+        return 1.0
+    if arm.get("validators_ok") is False:
+        return 0.0
+    return None
+
+
+def pareto(outcomes: list[dict[str, Any]]) -> dict[str, Any]:
+    """Cost vs verification: which arms are not beaten on both axes at once.
+
+    Without this, a cheap arm and a thorough arm look like an apples-to-oranges
+    table row and the reader has to do the trade-off in their head. Cost falls
+    back to tokens when no arm has a configured price.
+    """
+    use_usd = any(arm.get("cost_usd") is not None for arm in outcomes)
+    # One arm can have several runs. A frontier over configurations needs one
+    # point per configuration, so repeats are averaged rather than plotted as
+    # separate (and therefore artificially dominant) points.
+    grouped: dict[str, list[dict[str, Any]]] = {}
+    for arm in outcomes:
+        score = _verification_score(arm)
+        cost = (
+            arm.get("cost_usd")
+            if use_usd
+            else (arm.get("tokens_in") or 0) + (arm.get("tokens_out") or 0)
+        )
+        if score is None or cost is None:
+            continue
+        grouped.setdefault(arm["arm"], []).append(
+            {
+                "cost": float(cost),
+                "score": score,
+                "status": arm.get("status"),
+                "compose_mode": arm.get("compose_mode"),
+            }
+        )
+
+    points: list[dict[str, Any]] = []
+    for name, entries in grouped.items():
+        points.append(
+            {
+                "arm": name,
+                "runs": len(entries),
+                "cost": sum(e["cost"] for e in entries) / len(entries),
+                "verification_score": sum(e["score"] for e in entries) / len(entries),
+                "status": entries[-1]["status"],
+                "compose_mode": entries[-1]["compose_mode"],
+            }
+        )
+
+    frontier: list[str] = []
+    for point in points:
+        dominated = any(
+            other["cost"] <= point["cost"]
+            and other["verification_score"] >= point["verification_score"]
+            and (
+                other["cost"] < point["cost"]
+                or other["verification_score"] > point["verification_score"]
+            )
+            for other in points
+            if other is not point
+        )
+        point["pareto_optimal"] = not dominated
+        if not dominated:
+            frontier.append(point["arm"])
+
+    caveats: list[str] = []
+    replay_on_frontier = [
+        point["arm"]
+        for point in points
+        if point.get("pareto_optimal") and point.get("compose_mode") == "replay"
+    ]
+    if replay_on_frontier:
+        caveats.append(
+            "replay 臂复用已有内容，成本天然为 0，因此总是落在前沿上（"
+            + "、".join(replay_on_frontier)
+            + "）。它是基线，不是可选的生成方案；比较真实方案时请看其余点。"
+        )
+    if not use_usd:
+        caveats.append(
+            "没有臂配置单价，横轴退化为 token 总量；配置 provider 单价后才能比较真实成本。"
+        )
+    unscored = [
+        arm["arm"] for arm in outcomes if _verification_score(arm) is None
+    ]
+    if unscored:
+        shown = ", ".join(sorted(set(unscored))[:6])
+        caveats.append(
+            f"{len(unscored)} 个臂没有验证结果（在进入校验前就失败了），未画入图中：{shown}。"
+            "排除它们会让前沿看起来比实际更干净。"
+        )
+
+    return {
+        "axis": "cost_usd" if use_usd else "tokens",
+        "frontier": sorted(frontier),
+        "points": sorted(points, key=lambda item: (item["cost"], -item["verification_score"])),
+        "caveats": caveats,
+    }
+
+
 def _row_summary(row: RunRow) -> dict[str, Any]:
     return {
         "run_id": row.run_id,
@@ -240,6 +383,37 @@ def _markdown(report: dict[str, Any]) -> str:
     if report["skipped"]:
         lines += ["", "## 跳过", ""]
         lines += [f"- {entry['arm']}：{entry['reason']}" for entry in report["skipped"]]
+    frontier = report.get("pareto") or {}
+    if frontier.get("points"):
+        axis = "成本 (USD)" if frontier["axis"] == "cost_usd" else "token 总量"
+        lines += [
+            "",
+            "## 成本—严格度 Pareto",
+            "",
+        f"横轴越小越好：{axis}；纵轴越大越好：可核验率（无该指标时取校验是否全过）。",
+        "",
+        "同一臂的多次运行取均值后作为图上一个点。",
+        "",
+        f"| arm | {axis} | 可核验率 | 帕累托最优 |",
+            "| --- | --- | --- | --- |",
+        ]
+        for point in frontier["points"]:
+            cost = (
+                f"${point['cost']:.4f}"
+                if frontier["axis"] == "cost_usd"
+                else f"{int(point['cost'])}"
+            )
+            lines.append(
+                f"| {point['arm']} | {cost} | {point['verification_score']:.2f} | "
+                f"{'✅' if point.get('pareto_optimal') else ''} |"
+            )
+        lines += [
+            "",
+            f"- 前沿：{', '.join(frontier['frontier']) or '（无）'}",
+            "- 前沿上的臂互不支配：想同时更便宜又更严格，只能换设计，不能在现有臂里挑。",
+        ]
+        for caveat in frontier.get("caveats", []):
+            lines.append(f"- ⚠️ {caveat}")
     lines += [
         "",
         "## 口径",

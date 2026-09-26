@@ -9,9 +9,17 @@ import shutil
 import sys
 from pathlib import Path
 
-from . import __version__, config as config_mod, launchd, memory, paths, taskspec
+from . import (
+    __version__,
+    config as config_mod,
+    launchd,
+    memory,
+    paths,
+    taskspec,
+    verification_eval,
+)
 from .errors import AlreadyDone, ConfigError, HarnessError, LockBusy
-from .experiment import load as load_experiment, run_experiment
+from .experiment import compare as compare_experiment, load as load_experiment, run_experiment
 from .ledger import Ledger
 from .logutil import console
 from .providers import get as get_provider
@@ -148,6 +156,11 @@ def build_parser() -> argparse.ArgumentParser:
     exp_run.set_defaults(_handler=cmd_experiment_run)
     exp_list = exp_sub.add_parser("list")
     exp_list.set_defaults(_handler=cmd_experiment_list)
+    exp_compare = exp_sub.add_parser(
+        "compare", help="rebuild a report (with the cost/verification Pareto) from the ledger"
+    )
+    exp_compare.add_argument("prefix", help="experiment id prefix, e.g. daily-trends-compare")
+    exp_compare.set_defaults(_handler=cmd_experiment_compare)
 
     lc = sub.add_parser("launchd", help="render/install the unattended trigger")
     lc_sub = lc.add_subparsers(dest="launchd_command", required=True)
@@ -165,6 +178,29 @@ def build_parser() -> argparse.ArgumentParser:
 
     doctor = sub.add_parser("doctor", help="check the environment this harness depends on")
     doctor.set_defaults(_handler=cmd_doctor)
+
+    ver = sub.add_parser("verify", help="measure the acceptance gate itself")
+    ver_sub = ver.add_subparsers(dest="verify_command", required=True)
+    v_corpus = ver_sub.add_parser("corpus", help="build a labelled corpus from real captures")
+    v_corpus.add_argument(
+        "--days",
+        action="append",
+        default=None,
+        help="YYYY-MM-DD (repeatable); default is every day with a capture",
+    )
+    v_corpus.add_argument("--out", help="where to write corpus.json")
+    v_corpus.add_argument("--per-kind", type=int, default=25, help="cap per kind per day")
+    v_corpus.set_defaults(_handler=cmd_verify_corpus)
+    v_eval = ver_sub.add_parser("eval", help="score matchers against the corpus")
+    v_eval.add_argument("--corpus", help="corpus.json (built on the fly when missing)")
+    v_eval.add_argument(
+        "--match",
+        default="legacy,typed",
+        help="comma-separated matchers: legacy, typed, llm",
+    )
+    v_eval.add_argument("--allow-llm", action="store_true", help="allow the paid llm-judge baseline")
+    v_eval.add_argument("--llm-sample", type=int, default=40, help="cap samples sent to the judge")
+    v_eval.set_defaults(_handler=cmd_verify_eval)
     return parser
 
 
@@ -411,6 +447,27 @@ def cmd_experiment_list(args: argparse.Namespace) -> int:
     return EXIT_OK
 
 
+def cmd_experiment_compare(args: argparse.Namespace) -> int:
+    log = console()
+    report = compare_experiment(args.prefix)
+    if not report["arms"]:
+        log.error(f"no runs recorded under experiment prefix {args.prefix!r}")
+        return EXIT_FAIL
+    log.info(f"rebuilt {len(report['arms'])} arm(s) from the ledger")
+    frontier = report.get("pareto") or {}
+    if frontier.get("points"):
+        axis = "cost_usd" if frontier["axis"] == "cost_usd" else "tokens"
+        for point in frontier["points"]:
+            mark = "★" if point.get("pareto_optimal") else " "
+            log.info(
+                f"  {mark} {point['arm']:<28} {axis}={point['cost']:>10.2f} "
+                f"verify={point['verification_score']:.2f}"
+            )
+        log.info(f"frontier: {', '.join(frontier['frontier']) or '（无）'}")
+    log.info(f"report: {report['report_md']}")
+    return EXIT_OK
+
+
 def cmd_launchd_render(args: argparse.Namespace) -> int:
     task = taskspec.load(args.task)
     if args.out:
@@ -490,6 +547,89 @@ def cmd_doctor(args: argparse.Namespace) -> int:
             log.error(f"  - {problem}")
         return EXIT_FAIL
     log.info("all checks passed")
+    return EXIT_OK
+
+
+def cmd_verify_corpus(args: argparse.Namespace) -> int:
+    log = console()
+    days = args.days or verification_eval.available_days()
+    if not days:
+        log.error("no day has both a capture and a composed article")
+        return EXIT_FAIL
+    corpus = verification_eval.build_corpus(days, max_per_kind_per_day=args.per_kind)
+    target = Path(args.out) if args.out else verification_eval.default_corpus_path()
+    verification_eval.save_corpus(target, corpus)
+    from collections import Counter
+
+    kinds = Counter(sample["kind"] for sample in corpus["samples"])
+    log.info(f"corpus: {len(corpus['samples'])} samples over {len(days)} day(s)")
+    for kind, count in sorted(kinds.items()):
+        log.info(f"  - {kind:<20} {count}")
+    log.info(f"written: {target}")
+    return EXIT_OK
+
+
+def cmd_verify_eval(args: argparse.Namespace) -> int:
+    log = console()
+    corpus_path = Path(args.corpus) if args.corpus else verification_eval.default_corpus_path()
+    if corpus_path.is_file():
+        corpus = verification_eval.load_corpus(corpus_path)
+        log.info(f"corpus: {corpus_path} ({len(corpus.get('samples', []))} samples)")
+    else:
+        days = verification_eval.available_days()
+        if not days:
+            log.error("no corpus and no captures to build one from")
+            return EXIT_FAIL
+        corpus = verification_eval.build_corpus(days)
+        verification_eval.save_corpus(corpus_path, corpus)
+        log.info(f"corpus: built {len(corpus['samples'])} samples -> {corpus_path}")
+
+    wanted = [name.strip() for name in args.match.split(",") if name.strip()]
+    matchers = {}
+    if "legacy" in wanted:
+        matchers["legacy"] = verification_eval.legacy_matcher
+    if "typed" in wanted:
+        matchers["typed"] = verification_eval.typed_matcher
+    if "llm" in wanted:
+        if not args.allow_llm:
+            log.info("llm matcher skipped: pass --allow-llm to enable the paid baseline")
+        else:
+            agent_config = config_mod.load()
+            provider = get_provider(agent_config)
+            ok, detail = provider.available()
+            if not ok:
+                log.error(f"llm matcher unavailable: {detail}")
+                return EXIT_FAIL
+            # Cap the paid calls, and make every matcher answer the same subset.
+            before = len(corpus.get("samples", []))
+            corpus = verification_eval.subsample(corpus, args.llm_sample)
+            log.info(
+                f"llm baseline: judging {len(corpus['samples'])}/{before} samples "
+                f"(all matchers scored on this subset)"
+            )
+            matchers["llm"] = verification_eval.llm_matcher(provider)
+    if not matchers:
+        log.error(f"no known matcher in {wanted!r}; expected legacy/typed/llm")
+        return EXIT_FAIL
+
+    report = verification_eval.compare_matchers(corpus, matchers)
+    outdir = paths.runs_dir() / "verification" / f"{dt.datetime.now():%Y%m%d-%H%M%S}"
+    outdir.mkdir(parents=True, exist_ok=True)
+    text = verification_eval.markdown(report)
+    (outdir / "report.md").write_text(text, encoding="utf-8")
+    (outdir / "report.json").write_text(
+        json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8"
+    )
+    for entry in report["matchers"]:
+        fpr = entry["false_pass_rate"]
+        ffr = entry["false_fail_rate"]
+        log.info(
+            f"  - {entry['matcher']:<8} 漏检率={fpr:.1%} 误杀率={ffr:.1%} "
+            f"({entry['false_pass_count']}/{entry['attacks']} attacks passed)"
+            if fpr is not None and ffr is not None
+            else f"  - {entry['matcher']:<8} 样本不足"
+        )
+    log.info(f"report: {outdir / 'report.md'}")
     return EXIT_OK
 
 
