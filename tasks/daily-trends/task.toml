@@ -35,6 +35,15 @@ repair_rounds = 1
 [publish]
 # Safety default: a manual run never pushes unless you pass --publish.
 default_enabled = false
+
+[policy]
+# Fail-closed. A reference that cannot be traced back to today's raw capture
+# (CANNOT_VERIFY: the cited URL extends a real one, so the prefix is real but the
+# remainder is unknown) must not reach a published page. The alternative,
+# on_cannot_verify = "warn", records the uncertainty and continues.
+on_fail = "block"
+on_cannot_verify = "block"
+on_abstain = "block"
 # 用 SSH 别名而不是 origin：本机网络策略会挡 github.com:443（api 与 SSH 正常），
 # 这也是 daily-trends RUNBOOK 里使用的地址。
 remote = "git@github-simonzj1:Simon-zj1/Simon-zj1.github.io.git"
@@ -60,6 +69,7 @@ id = "fetch"
 command = ["python3", "steps/10_fetch.py"]
 allow_degrade = true
 timeout_sec = 1500
+skip_on_dry_run = true
 note = "抓取当日 raw 数据；代理或额度不可用时降级"
 
 [[steps]]

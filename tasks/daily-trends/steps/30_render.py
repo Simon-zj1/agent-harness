@@ -134,6 +134,12 @@ def _render_preview(ctx, *, tools: Path, content: dict) -> Path:
     module.DATA_DIR = data_dir
     module.ARTIFACT_ROOT = preview_root / "artifacts"
     module.HEXO_SOURCE = preview_root / "hexo-source"
+    # HEXO_DATA is derived from HEXO_SOURCE at import time, so patching the
+    # source alone left it pointing at the real blog checkout: preview runs
+    # silently rewrote <blog>/source/_data/ai_briefing.json, and the
+    # relative_to(HEXO_SOURCE) in the renderer then crashed on the mismatched
+    # path. Rebinding it keeps every write inside the preview root.
+    module.HEXO_DATA = module.HEXO_SOURCE / "_data"
     module.SITE_ROOT = preview_root
     module.TRENDS_DIR = preview_root / "trends"
     module.TECH_INDEX = preview_root / "tech" / "index.html"
