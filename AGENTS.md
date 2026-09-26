@@ -7,6 +7,7 @@
 - `agent` — 唯一入口（`./agent run|status|report|runs|annotate|memory|experiment|verify|launchd|doctor`）
 - `harness/` — 内核：runtime（幂等/锁/台账）、tools（权限与审计）、memory（文件优先）、
   decisions（类型化决策）、validators（验收标准）、verification_eval（测量闸门自身）、
+  validator_probes（校验器不变式的对抗探针）、
   providers（模型适配）、loop（自研循环）、experiment（实验台）
 - `tasks/<name>/task.toml` — 任务声明（步骤、工具白名单、可写路径、校验、预算）
 - `memory/` — `runs/` 为自动写入的事实记录，`notes/` 为人工确认的长期结论
@@ -30,6 +31,7 @@ python3 -m unittest discover -t . -s tests -v
 ./agent doctor
 ./agent run daily-trends --date 2026-09-25 --compose replay --dry-run
 ./agent verify eval
+./agent verify probes
 ```
 
 `-t .` 是必需的：测试用相对导入（`from .helpers import ...`），不指定顶层目录会直接

@@ -16,6 +16,7 @@ from . import (
     memory,
     paths,
     taskspec,
+    validator_probes,
     verification_eval,
 )
 from .errors import AlreadyDone, ConfigError, HarnessError, LockBusy
@@ -206,6 +207,15 @@ def build_parser() -> argparse.ArgumentParser:
         help="freeze this run as the regression baseline instead of comparing against it",
     )
     v_eval.set_defaults(_handler=cmd_verify_eval)
+    v_probes = ver_sub.add_parser(
+        "probes", help="adversarial probes for a validator's invariants"
+    )
+    v_probes.add_argument(
+        "--group",
+        default=None,
+        help="probe group (default: all); currently: refund",
+    )
+    v_probes.set_defaults(_handler=cmd_verify_probes)
     return parser
 
 
@@ -553,6 +563,35 @@ def cmd_doctor(args: argparse.Namespace) -> int:
         return EXIT_FAIL
     log.info("all checks passed")
     return EXIT_OK
+
+
+def cmd_verify_probes(args: argparse.Namespace) -> int:
+    log = console()
+    try:
+        probes = validator_probes.all_probes(args.group)
+    except KeyError as exc:
+        log.error(str(exc))
+        return EXIT_FAIL
+    report = validator_probes.run_probes(probes)
+    outdir = (
+        paths.runs_dir() / "verification" / f"probes-{dt.datetime.now():%Y%m%d-%H%M%S}"
+    )
+    outdir.mkdir(parents=True, exist_ok=True)
+    (outdir / "report.md").write_text(validator_probes.markdown(report), encoding="utf-8")
+    (outdir / "report.json").write_text(
+        json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8"
+    )
+    for outcome in report["outcomes"]:
+        log.info(
+            f"  {'OK ' if outcome['correct'] else 'BAD'} {outcome['probe_id']:<26} "
+            f"expect={outcome['expect']:<9} "
+            f"{'blocked' if outcome['blocked'] else 'allowed':<8} {outcome['note']}"
+        )
+    log.info(
+        f"probes={report['probes']} 漏判={report['missed']} 误拦={report['overblocked']}"
+    )
+    log.info(f"report: {outdir / 'report.md'}")
+    return EXIT_OK if report["ok"] else EXIT_FAIL
 
 
 def cmd_verify_corpus(args: argparse.Namespace) -> int:
