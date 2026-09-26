@@ -55,6 +55,29 @@ class ProbeSuiteHealthTests(unittest.TestCase):
 
 
 class ProbeRegistryTests(unittest.TestCase):
+    def test_the_merge_gate_has_its_own_probe_group(self) -> None:
+        probes = vp.all_probes("merge")
+        self.assertTrue(probes)
+        self.assertTrue(all(p.validator == "pr_merge_gate" for p in probes))
+
+    def test_the_merge_group_covers_the_case_ci_cannot_see(self) -> None:
+        """A green test bar plus an undecidable blast radius must still block.
+
+        That single case is the whole reason the merge decision was split into
+        three judgements instead of trusting the CI result.
+        """
+        probes = vp.all_probes("merge")
+        scope = [p for p in probes if p.probe_id == "merge-scope-undecidable"]
+        self.assertEqual(len(scope), 1)
+        decisions = {c["check"]: c["decision"] for c in scope[0].payload["checks"]}
+        self.assertEqual(decisions["TESTS_PASS"], "pass")
+        self.assertEqual(decisions["NO_UNINTENDED_SCOPE"], "cannot_verify")
+        self.assertEqual(scope[0].expect, vp.EXPECT_NOT_PASS)
+
+    def test_both_probe_groups_hold_on_the_real_validators(self) -> None:
+        report = vp.run_probes(vp.all_probes())
+        self.assertTrue(report["ok"], report["outcomes"])
+
     def test_unknown_group_is_rejected(self) -> None:
         with self.assertRaises(KeyError):
             vp.all_probes("does_not_exist")

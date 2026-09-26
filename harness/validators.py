@@ -498,6 +498,98 @@ def refund_decisions_fail_closed(
     )
 
 
+@validator("pr_merge_gate")
+def pr_merge_gate(
+    path: str | Path,
+    *,
+    name: str = "pr_merge_gate",
+) -> dict[str, Any]:
+    """Auto-merge only when every judgement returned a definite pass.
+
+    This is the whole point of splitting the decision. "CI is green" is one
+    judgement; a change can pass it and still be unmergeable because its blast
+    radius is unknown or it reached across the architecture.
+
+    The invariant: `cannot_verify` on any check blocks. A change nobody can
+    reason about is not a change that merges unattended.
+    """
+    try:
+        payload = load_content(path)
+    except ValidationFailed as exc:
+        return _result(name, False, str(exc), failure_class=FailureClass.MALFORMED)
+
+    checks = payload.get("checks") or []
+    if not checks:
+        return _result(
+            name,
+            False,
+            "no checks were produced",
+            failure_class=FailureClass.MALFORMED,
+        )
+
+    valid = {member.value for member in Decision}
+    blocking: list[Evidence] = []
+    tally: dict[str, int] = {}
+    for entry in checks:
+        label = str(entry.get("check", "?"))
+        decision = str(entry.get("decision", ""))
+        tally[decision] = tally.get(decision, 0) + 1
+        if decision not in valid:
+            blocking.append(Evidence(ref=label, detail=f"unknown decision {decision!r}"))
+            continue
+        if decision == Decision.FAIL.value:
+            blocking.append(
+                Evidence(ref=label, detail=f"failed: {entry.get('detail', '')}")
+            )
+        elif decision == Decision.CANNOT_VERIFY.value:
+            blocking.append(
+                Evidence(
+                    ref=label,
+                    detail=(
+                        "fail-closed: could not be decided, so it does not merge. "
+                        + str(entry.get("detail", ""))
+                    ),
+                )
+            )
+        elif decision == Decision.ABSTAIN.value:
+            blocking.append(
+                Evidence(ref=label, detail="abstained; treated as blocking")
+            )
+
+    declared = payload.get("merge")
+    if declared == "allow" and blocking:
+        blocking.append(
+            Evidence(
+                ref="review.json",
+                detail="the artifact claims merge=allow while a check blocks",
+            )
+        )
+
+    ok = not blocking
+    return _result(
+        name,
+        ok,
+        (
+            f"{len(checks)} judgements all passed: "
+            + ", ".join(str(entry.get("check")) for entry in checks)
+            if ok
+            else f"{len(blocking)} blocking judgement(s); auto-merge refused"
+        ),
+        decision=Decision.PASS if ok else Decision.FAIL,
+        failure_class=FailureClass.POLICY_VIOLATION if not ok else None,
+        evidence_items=blocking[:40],
+        remediation=(
+            "Resolve every FAIL, and replace every CANNOT_VERIFY with a definite "
+            "answer (declare a scope, restore the revision range, or make the "
+            "suite runnable). Do not merge on an undecided change."
+        )
+        if not ok
+        else None,
+        failures=[{"issue": item.detail, "ref": item.ref} for item in blocking[:40]],
+        metrics={"checks": len(checks), "decisions": tally, "blocking": len(blocking)},
+    )
+
+
 @validator("sitemap_sane")
 def sitemap_sane(
     path: str | Path,

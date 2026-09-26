@@ -143,8 +143,121 @@ def refund_probes() -> list[Probe]:
     ]
 
 
+def _merge_review(*decisions: tuple[str, str]) -> dict[str, Any]:
+    """Build a review artifact from (check name, decision) pairs."""
+    checks = [
+        {"check": name, "decision": decision, "detail": f"stub {decision}"}
+        for name, decision in decisions
+    ]
+    return {
+        "range": "HEAD~1..HEAD",
+        "scope": ["harness/"],
+        "checks": checks,
+        "merge": "allow"
+        if all(decision == "pass" for _, decision in decisions)
+        else "block",
+    }
+
+
+def merge_probes() -> list[Probe]:
+    """Probes for `pr_merge_gate`.
+
+    The invariant under test is the one that separates this from "CI is green":
+    a judgement that could not be made must not become an auto-merge.
+    """
+    return [
+        Probe(
+            "merge-all-three-pass",
+            "pr_merge_gate",
+            _merge_review(
+                ("NO_UNINTENDED_SCOPE", "pass"),
+                ("ARCHITECTURE_OK", "pass"),
+                ("TESTS_PASS", "pass"),
+            ),
+            EXPECT_PASS,
+            "every judgement decided, all green: merge",
+        ),
+        Probe(
+            "merge-scope-undecidable",
+            "pr_merge_gate",
+            _merge_review(
+                ("NO_UNINTENDED_SCOPE", "cannot_verify"),
+                ("ARCHITECTURE_OK", "pass"),
+                ("TESTS_PASS", "pass"),
+            ),
+            EXPECT_NOT_PASS,
+            "the case a green CI bar cannot see: tests pass, blast radius unknown",
+        ),
+        Probe(
+            "merge-architecture-violated",
+            "pr_merge_gate",
+            _merge_review(
+                ("NO_UNINTENDED_SCOPE", "pass"),
+                ("ARCHITECTURE_OK", "fail"),
+                ("TESTS_PASS", "pass"),
+            ),
+            EXPECT_NOT_PASS,
+            "a layering rule was crossed",
+        ),
+        Probe(
+            "merge-tests-uncertain",
+            "pr_merge_gate",
+            _merge_review(
+                ("NO_UNINTENDED_SCOPE", "pass"),
+                ("ARCHITECTURE_OK", "pass"),
+                ("TESTS_PASS", "cannot_verify"),
+            ),
+            EXPECT_NOT_PASS,
+            "zero tests discovered is not a green bar",
+        ),
+        Probe(
+            "merge-abstained",
+            "pr_merge_gate",
+            _merge_review(
+                ("NO_UNINTENDED_SCOPE", "pass"),
+                ("ARCHITECTURE_OK", "abstain"),
+                ("TESTS_PASS", "pass"),
+            ),
+            EXPECT_NOT_PASS,
+            "abstaining is treated as blocking, not as consent",
+        ),
+        Probe(
+            "merge-unknown-decision-word",
+            "pr_merge_gate",
+            _merge_review(
+                ("NO_UNINTENDED_SCOPE", "pass"),
+                ("ARCHITECTURE_OK", "probably_fine"),
+                ("TESTS_PASS", "pass"),
+            ),
+            EXPECT_NOT_PASS,
+            "a decision outside the vocabulary must not merge",
+        ),
+        Probe(
+            "merge-no-checks-at-all",
+            "pr_merge_gate",
+            {"range": "HEAD~1..HEAD", "scope": [], "checks": [], "merge": "allow"},
+            EXPECT_NOT_PASS,
+            "an empty review must not read as 'nothing objected'",
+        ),
+        Probe(
+            "merge-artifact-contradicts-itself",
+            "pr_merge_gate",
+            {
+                "range": "HEAD~1..HEAD",
+                "scope": ["harness/"],
+                "checks": [
+                    {"check": "TESTS_PASS", "decision": "fail", "detail": "stub"}
+                ],
+                "merge": "allow",
+            },
+            EXPECT_NOT_PASS,
+            "the artifact claims allow while a check blocks",
+        ),
+    ]
+
+
 def probe_registry() -> dict[str, Callable[[], list[Probe]]]:
-    return {"refund": refund_probes}
+    return {"refund": refund_probes, "merge": merge_probes}
 
 
 def all_probes(name: str | None = None) -> list[Probe]:

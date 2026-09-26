@@ -1,0 +1,26 @@
+name = "pr-guard"
+title = "变更合并守卫 · 三判决 fail-closed"
+description = "对一段 git 变更做三个独立判决（测试 / 架构 / 波及范围）；任一无法核验则不自动合并。"
+date_mode = "today"
+timezone = "Asia/Shanghai"
+
+lock_scope = ["task"]
+
+allowed_tools = ["shell_run", "fs_read", "fs_list", "fs_exists"]
+readable_paths = ["${AGENT_REPO_ROOT}", "{run_dir}"]
+writable_paths = ["{run_dir}"]
+
+[policy]
+on_fail = "block"
+on_cannot_verify = "block"
+on_abstain = "block"
+
+[[steps]]
+id = "10_review"
+command = ["python3", "steps/10_review.py"]
+timeout_sec = 1200
+note = "三个独立判决：TESTS_PASS / ARCHITECTURE_OK / NO_UNINTENDED_SCOPE"
+
+[[validators]]
+name = "pr_merge_gate"
+args = { path = "{run_dir}/review.json" }
