@@ -1,0 +1,27 @@
+name = "refund-guard"
+title = "退款决策守卫 · fail-closed 验证层"
+description = "在高风险决策（自动退款）上演示 typed decision：模型提议，确定性校验决定；无法核对的前提一律拒绝。"
+date_mode = "today"
+timezone = "Asia/Shanghai"
+
+lock_scope = ["task"]
+
+allowed_tools = ["fs_read", "fs_list", "fs_exists"]
+readable_paths = ["{task_dir}/fixtures", "{run_dir}"]
+writable_paths = ["{run_dir}"]
+
+[policy]
+# This task cannot loosen the gate: refunds move money, so "could not verify"
+# must deny. Kept explicit so nobody has to read the validator to learn that.
+on_fail = "block"
+on_cannot_verify = "block"
+on_abstain = "block"
+
+[[steps]]
+id = "10_decide"
+command = ["python3", "steps/10_decide.py"]
+note = "确定性退款判定：订单状态 / 退款窗口 / 支付凭证 / 币种四项 ground-truth 核对"
+
+[[validators]]
+name = "refund_decisions_fail_closed"
+args = { path = "{run_dir}/decisions.json" }

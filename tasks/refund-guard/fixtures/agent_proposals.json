@@ -1,0 +1,11 @@
+{
+  "note": "What the agent wants to do. The verifier is allowed to disagree; every override is recorded.",
+  "proposals": [
+    {"order_id": "ord_1001", "proposed_action": "approve", "reason": "客户说没收到货，情绪激动"},
+    {"order_id": "ord_1002", "proposed_action": "approve", "reason": "老客户，破例一次"},
+    {"order_id": "ord_1003", "proposed_action": "approve", "reason": "订单看起来是正常的已送达订单"},
+    {"order_id": "ord_1004", "proposed_action": "approve", "reason": "客户要求取消"},
+    {"order_id": "ord_1005", "proposed_action": "approve", "reason": "金额很小"},
+    {"order_id": "ord_9999", "proposed_action": "approve", "reason": "客户提供了订单号"}
+  ]
+}

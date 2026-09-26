@@ -1,0 +1,50 @@
+{
+  "policy": {
+    "refund_window_days": 30,
+    "refundable_statuses": ["delivered", "partially_returned"],
+    "currency": "CNY"
+  },
+  "payment_ledger": ["pay_1001", "pay_1002", "pay_1004"],
+  "orders": [
+    {
+      "order_id": "ord_1001",
+      "status": "delivered",
+      "days_since_delivery": 6,
+      "amount": 268.0,
+      "currency": "CNY",
+      "payment_ref": "pay_1001"
+    },
+    {
+      "order_id": "ord_1002",
+      "status": "delivered",
+      "days_since_delivery": 41,
+      "amount": 899.0,
+      "currency": "CNY",
+      "payment_ref": "pay_1002"
+    },
+    {
+      "order_id": "ord_1003",
+      "status": "delivered",
+      "days_since_delivery": 12,
+      "amount": 199.0,
+      "currency": "CNY",
+      "payment_ref": "pay_9999"
+    },
+    {
+      "order_id": "ord_1004",
+      "status": "in_transit",
+      "days_since_delivery": 3,
+      "amount": 520.0,
+      "currency": "CNY",
+      "payment_ref": "pay_1004"
+    },
+    {
+      "order_id": "ord_1005",
+      "status": "delivered",
+      "days_since_delivery": 9,
+      "amount": 88.0,
+      "currency": "USD",
+      "payment_ref": "pay_1005"
+    }
+  ]
+}
