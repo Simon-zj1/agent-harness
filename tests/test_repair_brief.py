@@ -20,6 +20,32 @@ from .helpers import Sandbox
 
 
 class RepairBriefTests(unittest.TestCase):
+    def test_every_failing_validator_offers_a_remediation(self) -> None:
+        """The brief is only actionable if each entry says what to do about it."""
+        from pathlib import Path
+
+        from harness import validators as validators_mod
+
+        fixtures = Path(__file__).resolve().parent / "fixtures"
+        content = fixtures / "daily-trends-2026-09-25" / "content.json"
+        raw = fixtures / "daily-trends-2026-09-25" / "raw.json"
+
+        # Feed each validator something it should reject, and require a fix hint.
+        with tempfile.TemporaryDirectory() as tmp:
+            hollow = Path(tmp) / "hollow.json"
+            hollow.write_text(
+                json.dumps({"date": "2026-09-25", "sections": []}), encoding="utf-8"
+            )
+            broken = validators_mod.daily_trends_structure(hollow)
+            self.assertFalse(broken["ok"])
+            self.assertTrue(broken.get("remediation"), broken)
+
+        orphans = validators_mod.daily_trends_references(content)
+        self.assertTrue(orphans["ok"], "fixture should be clean")
+
+        sitemap = validators_mod.sitemap_sane(Path("/nonexistent/sitemap.xml"))
+        self.assertFalse(sitemap["ok"])
+
     def test_only_failing_validators_appear(self) -> None:
         results = [
             {"name": "ok_one", "ok": True, "decision": "pass"},

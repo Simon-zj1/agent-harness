@@ -133,6 +133,13 @@ def daily_trends_structure(
         name,
         ok,
         "structure ok" if ok else f"{len(failures)} structural problem(s)",
+        remediation=(
+            "The published pages depend on this shape. Re-run compose, or fix the "
+            "offending items: every item needs zh+en title/summary/comment and at "
+            "least one source."
+        )
+        if not ok
+        else None,
         failures=failures[:40],
         metrics=metrics,
     )
@@ -260,6 +267,13 @@ def daily_trends_references(
         name,
         ok,
         "references ok" if ok else f"{len(failures)} reference problem(s)",
+        remediation=(
+            "Every cited source id must resolve, every reference must be cited at "
+            "least once, and urls must be http(s). Drop the orphan references or "
+            "cite them."
+        )
+        if not ok
+        else None,
         failures=failures[:40],
         metrics={
             "references": len(references),
@@ -542,6 +556,12 @@ def sitemap_sane(
         name,
         ok,
         "sitemap ok" if ok else f"{len(failures)} sitemap problem(s)",
+        remediation=(
+            "The sitemap is accumulating instead of being rewritten in place. "
+            "Re-run the renderer, or restore the file from git if it drifted."
+        )
+        if not ok
+        else None,
         failures=failures,
         metrics={
             "urls": len(locs),
