@@ -22,6 +22,7 @@ from pathlib import Path
 from typing import Any, Callable, Iterable
 
 from .decisions import Decision, canonical_url, classify_url
+from .errors import HarnessError
 
 DEFAULT_DATA_DIR = "/Users/simon-zj/Documents/ChatGPT/daily-trends/data"
 
@@ -82,7 +83,13 @@ def data_dir() -> Path:
 
 
 def _load_json(path: Path) -> Any:
-    return json.loads(path.read_text(encoding="utf-8"))
+    target = Path(path)
+    if not target.is_file():
+        raise HarnessError(
+            f"missing file: {target}. Set DAILY_TRENDS_DATA_DIR to the directory "
+            "holding <date>.json and raw/<date>.json."
+        )
+    return json.loads(target.read_text(encoding="utf-8"))
 
 
 def _raw_urls(day: str, *, root: Path | None = None) -> set[str]:
