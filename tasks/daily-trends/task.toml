@@ -33,14 +33,21 @@ prompt_dir = "prompts"
 repair_rounds = 1
 
 [publish]
-# Disabled on purpose. This used to push from the 个人网站 checkout, but that
-# clone has diverged: its HEAD would delete ~790 lines of
-# tech/papers/rrsi-harness-rsi and other pages that arrived via hexo deploys.
-# The trends pages do not need it either - scripts/daily-trends.js generates
-# them during `hexo generate`, so the site already ships them.
-# Re-enable only after the checkout is re-synced with the Pages repo.
+# Disabled on purpose, for two reasons that outlive the divergence that first
+# surfaced it.
+#
+# 1. Redundant. scripts/daily-trends.js generates trends/* during `hexo
+#    generate`, and tools/deploy.sh in the blog repo ships the whole site -
+#    verified: origin/main already carries trends/2026-09-25.
+# 2. A second writer. This step commits trends pages straight into the 个人网站
+#    checkout, and the blog build commits them via hexo. Two writers on one
+#    branch is what produced the earlier 792-line deletion in
+#    tech/papers/rrsi-harness-rsi. The checkout has since been re-synced
+#    (backup branch: backup/pre-resync-20260926), but the conflict is structural.
+#
+# The hexo path is authoritative. To publish a day, run blog/tools/deploy.sh.
 default_enabled = false
-disabled_reason = "个人网站 checkout diverged; its push would delete live content"
+disabled_reason = "redundant with hexo deploy; keeping one writer on the Pages branch"
 
 [policy]
 # Fail-closed. A reference that cannot be traced back to today's raw capture
