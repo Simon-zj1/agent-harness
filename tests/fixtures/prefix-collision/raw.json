@@ -1,0 +1,14 @@
+{
+  "note": "Three URLs where two share a prefix with the first. This is the shape that defeated the original boolean gate.",
+  "hn": [
+    {"title": "Release: llm 0.36", "url": "https://simonwillison.net/2026/Sep/22/llm/"},
+    {"title": "Release: llm-anthropic 0.29", "url": "https://simonwillison.net/2026/Sep/22/llm-anthropic/"},
+    {"title": "Release: llm-typesafe 0.1a0", "url": "https://simonwillison.net/2026/Sep/22/llm-typesafe/"}
+  ],
+  "github": [
+    {"full_name": "openwam-official/openwam", "html_url": "https://github.com/openwam-official/openwam"}
+  ],
+  "arxiv": [
+    {"title": "Harness-Zero", "url": "https://arxiv.org/abs/2609.24974v1"}
+  ]
+}

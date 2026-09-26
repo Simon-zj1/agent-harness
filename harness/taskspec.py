@@ -54,6 +54,7 @@ class TaskSpec:
     context: dict[str, Any] = field(default_factory=dict)
     budget: dict[str, Any] = field(default_factory=dict)
     publish: dict[str, Any] = field(default_factory=dict)
+    policy: dict[str, Any] = field(default_factory=dict)
     trigger: dict[str, Any] = field(default_factory=dict)
     paths_table: dict[str, str] = field(default_factory=dict)
     steps: list[StepSpec] = field(default_factory=list)
@@ -163,6 +164,7 @@ def load(name_or_dir: str | Path, *, root: Path | None = None) -> TaskSpec:
         context=raw.get("context", {}),
         budget=raw.get("budget", {}),
         publish=raw.get("publish", {}),
+        policy=raw.get("policy", {}),
         trigger=raw.get("trigger", {}),
         paths_table=raw.get("paths", {}),
         steps=steps,

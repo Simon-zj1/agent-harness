@@ -1,0 +1,15 @@
+{
+  "date": "2026-09-24",
+  "references": [
+    {"id": 1, "title": "Release: llm 0.36", "url": "https://simonwillison.net/2026/Sep/22/llm/"},
+    {"id": 2, "title": "Release: llm-anthropic 0.29", "url": "https://simonwillison.net/2026/Sep/22/llm-anthropic/"}
+  ],
+  "sections": [
+    {
+      "id": "insights",
+      "groups": [
+        {"id": "g1", "title": {"zh": "组", "en": "group"}, "items": [{"sources": [1, 2]}]}
+      ]
+    }
+  ]
+}

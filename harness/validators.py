@@ -1,4 +1,9 @@
-"""Named validators: acceptance criteria live in code, not in a prompt."""
+"""Named validators: acceptance criteria live in code, not in a prompt.
+
+Every validator answers with a typed decision (see `harness.decisions`), not a
+boolean. The boolean is still returned as `ok` so old callers keep working —
+but it is derived, and `CANNOT_VERIFY` is deliberately *not* ok.
+"""
 
 from __future__ import annotations
 
@@ -6,6 +11,17 @@ import json
 from pathlib import Path
 from typing import Any, Callable
 
+from .decisions import (
+    Decision,
+    DecisionPolicy,
+    DecisionResult,
+    Evidence,
+    FailureClass,
+    apply_policy,
+    canonical_url,
+    classify_url,
+    combine,
+)
 from .errors import ValidationFailed
 
 Validator = Callable[..., dict[str, Any]]
@@ -30,8 +46,36 @@ def names() -> list[str]:
     return sorted(_REGISTRY)
 
 
-def _result(name: str, ok: bool, detail: str, **rest: Any) -> dict[str, Any]:
-    return {"name": name, "ok": ok, "detail": detail, **rest}
+def _result(
+    name: str,
+    ok: bool,
+    detail: str,
+    *,
+    decision: Decision | None = None,
+    failure_class: FailureClass | None = None,
+    evidence_items: list[Evidence] | None = None,
+    remediation: str | None = None,
+    **rest: Any,
+) -> dict[str, Any]:
+    """Build a typed result, then let legacy keys (`failures`, `metrics`) win.
+
+    Keeping the legacy keys authoritative means none of the existing validators
+    or their tests had to change shape.
+    """
+    resolved = decision or (Decision.PASS if ok else Decision.FAIL)
+    if resolved is not Decision.PASS and failure_class is None:
+        failure_class = FailureClass.POLICY_VIOLATION
+    result = DecisionResult(
+        name=name,
+        decision=resolved,
+        detail=detail,
+        failure_class=failure_class,
+        evidence=evidence_items or [],
+        metrics=rest.get("metrics", {}),
+        remediation=remediation,
+    ).to_dict()
+    result.update(rest)
+    return result
 
 
 @validator("json_parseable")
@@ -233,10 +277,19 @@ def daily_trends_verifiable(
     min_ratio: float = 1.0,
     name: str = "daily_trends_verifiable",
 ) -> dict[str, Any]:
-    """Every cited reference must point at something that exists in the raw capture.
+    """Every cited reference must trace back to the raw capture — with receipts.
 
-    This is the anti-fabrication gate: an item can only be published if its
-    source URL was actually fetched today.
+    This is the anti-fabrication gate. It used to answer a boolean, which meant a
+    URL that merely *extended* a fetched URL (…/llm → …/llm-something-invented)
+    was reported as verified. It now separates three cases:
+
+        PASS            exact match, or an enumerated drift (scheme, www,
+                        trailing slash, tracking params, arxiv version)
+        CANNOT_VERIFY   the cited URL extends (or truncates) a fetched one, so we
+                        know the prefix is real but not the remainder
+        FAIL            nothing in the capture matches
+
+    See `harness.decisions.classify_url` for the matcher itself.
     """
     try:
         content = load_content(content_path)
@@ -247,7 +300,7 @@ def daily_trends_verifiable(
         return _result(name, False, f"missing raw capture: {raw_file}")
     raw = json.loads(raw_file.read_text(encoding="utf-8"))
 
-    raw_urls = _collect_urls(raw)
+    raw_urls = {canonical_url(u) for u in _collect_urls(raw)}
     references = content.get("references") or []
     used_ids: set[int] = set()
     for section in content.get("sections") or []:
@@ -258,20 +311,176 @@ def daily_trends_verifiable(
             used_ids.update(s for s in (item.get("sources") or []) if isinstance(s, int))
 
     cited = [ref for ref in references if ref.get("id") in used_ids]
-    unknown: list[dict[str, Any]] = []
+    verdicts: dict[int, Any] = {}
+    evidence_items: list[Evidence] = []
+    tally = {"pass": 0, "cannot_verify": 0, "fail": 0}
     for ref in cited:
+        ref_id = ref.get("id")
         url = str(ref.get("url", ""))
-        if not _url_in_raw(url, raw_urls):
-            unknown.append({"id": ref.get("id"), "url": url})
+        verdict = classify_url(url, raw_urls)
+        verdicts[ref_id] = verdict
+        tally[verdict.decision.value] = tally.get(verdict.decision.value, 0) + 1
+        if verdict.decision is not Decision.PASS:
+            evidence_items.append(
+                Evidence(
+                    ref=f"ref#{ref_id}",
+                    detail=verdict.reason,
+                    url=url,
+                )
+            )
 
-    ratio = 1.0 if not cited else (len(cited) - len(unknown)) / len(cited)
-    ok = bool(cited) and ratio >= min_ratio
+    traced = tally["pass"]
+    ratio = 1.0 if not cited else traced / len(cited)
+    if tally["fail"]:
+        decision = Decision.FAIL
+        failure_class = FailureClass.FABRICATED_SOURCE
+    elif tally["cannot_verify"]:
+        decision = Decision.CANNOT_VERIFY
+        failure_class = FailureClass.UNKNOWN_VARIANT
+    else:
+        decision = Decision.PASS
+        failure_class = None
+
+    ok = bool(cited) and decision is Decision.PASS and ratio >= min_ratio
+    if not cited:
+        decision = Decision.FAIL
+        failure_class = FailureClass.MALFORMED
+        detail = "no cited references to verify"
+    else:
+        detail = (
+            f"{traced}/{len(cited)} cited references trace back to the raw capture"
+            f" (cannot_verify={tally['cannot_verify']}, fail={tally['fail']})"
+        )
+
     return _result(
         name,
         ok,
-        f"{len(cited) - len(unknown)}/{len(cited)} cited references trace back to the raw capture",
-        failures=[{"issue": "reference not found in raw capture", **entry} for entry in unknown][:40],
-        metrics={"cited": len(cited), "traced": len(cited) - len(unknown), "verifiable_ratio": round(ratio, 4)},
+        detail,
+        decision=decision,
+        failure_class=failure_class,
+        evidence_items=evidence_items[:40],
+        remediation=(
+            "Re-fetch the cited page, or replace the citation with a URL that is "
+            "present in the raw capture."
+        )
+        if decision is not Decision.PASS
+        else None,
+        failures=[
+            {"issue": item.detail, "ref": item.ref, "url": item.url}
+            for item in evidence_items[:40]
+        ],
+        metrics={
+            "cited": len(cited),
+            "traced": traced,
+            "verifiable_ratio": round(ratio, 4),
+            "cannot_verify": tally["cannot_verify"],
+            "fail": tally["fail"],
+        },
+    )
+
+
+@validator("refund_decisions_fail_closed")
+def refund_decisions_fail_closed(
+    path: str | Path,
+    *,
+    name: str = "refund_decisions_fail_closed",
+) -> dict[str, Any]:
+    """High-stakes variant: an unverifiable refund must never be approved.
+
+    This is the same kernel applied to a decision that moves money. The only
+    difference from the publishing gate is the policy: here CANNOT_VERIFY is not
+    merely "block the step", it is *the decision* — the answer is deny.
+
+    Invariants checked:
+      decision=pass            -> action=approve
+      decision=fail            -> action=deny      (a rule was violated)
+      decision=cannot_verify   -> action must NOT be approve (fail-closed)
+    """
+    try:
+        payload = load_content(path)
+    except ValidationFailed as exc:
+        return _result(name, False, str(exc), failure_class=FailureClass.MALFORMED)
+
+    results = payload.get("results") or []
+    if not results:
+        return _result(
+            name,
+            False,
+            "no decisions to check",
+            failure_class=FailureClass.MALFORMED,
+        )
+
+    valid_decisions = {member.value for member in Decision}
+    valid_actions = {"approve", "deny", "escalate"}
+    violations: list[Evidence] = []
+    tally: dict[str, int] = {}
+
+    for entry in results:
+        order_id = str(entry.get("order_id", "?"))
+        decision = str(entry.get("decision", ""))
+        action = str(entry.get("action", ""))
+        tally[decision] = tally.get(decision, 0) + 1
+
+        if decision not in valid_decisions:
+            violations.append(
+                Evidence(ref=order_id, detail=f"unknown decision {decision!r}")
+            )
+            continue
+        if action not in valid_actions:
+            violations.append(
+                Evidence(ref=order_id, detail=f"unknown action {action!r}")
+            )
+            continue
+        if decision == Decision.PASS.value and action != "approve":
+            violations.append(
+                Evidence(
+                    ref=order_id,
+                    detail=f"every check passed but action is {action!r}",
+                )
+            )
+        if decision == Decision.FAIL.value and action != "deny":
+            violations.append(
+                Evidence(
+                    ref=order_id,
+                    detail=f"a rule failed but action is {action!r}: "
+                    f"{entry.get('failed_checks')}",
+                )
+            )
+        if decision == Decision.CANNOT_VERIFY.value and action == "approve":
+            violations.append(
+                Evidence(
+                    ref=order_id,
+                    detail="fail-closed violated: unverifiable precondition was "
+                    f"approved (unverified={entry.get('unverified_checks')})",
+                )
+            )
+
+    ok = not violations
+    detail = (
+        f"{len(results)} decisions respect the fail-closed invariant"
+        if ok
+        else f"{len(violations)} fail-closed violation(s)"
+    )
+    return _result(
+        name,
+        ok,
+        detail,
+        decision=Decision.PASS if ok else Decision.FAIL,
+        failure_class=FailureClass.POLICY_VIOLATION if not ok else None,
+        evidence_items=violations[:40],
+        remediation=(
+            "A precondition could not be checked against ground truth. Deny or "
+            "escalate; never approve."
+        ),
+        failures=[
+            {"issue": item.detail, "ref": item.ref} for item in violations[:40]
+        ],
+        metrics={
+            "orders": len(results),
+            "decisions": tally,
+            "cannot_verify": tally.get(Decision.CANNOT_VERIFY.value, 0),
+            "violations": len(violations),
+        },
     )
 
 
@@ -395,10 +604,16 @@ def run_all(
     run_dir: Path,
     extra: dict[str, Any] | None = None,
     logger: Any | None = None,
+    policy: DecisionPolicy | None = None,
 ) -> list[dict[str, Any]]:
-    """Execute declared validators, resolving `{date}` templates in their args."""
+    """Execute declared validators, resolving `{date}` templates in their args.
+
+    The task's policy is applied last: a validator answers with a decision, the
+    task decides whether CANNOT_VERIFY blocks. Fail-closed is the default.
+    """
     from .taskspec import render
 
+    policy = policy or DecisionPolicy()
     results: list[dict[str, Any]] = []
     for spec in specs:
         func = get(spec.name)
@@ -421,11 +636,14 @@ def run_all(
             result = func(**kwargs)
         except Exception as exc:  # a validator crash must not crash the run
             result = _result(spec.name, False, f"validator raised {type(exc).__name__}: {exc}")
+        result = apply_policy(result, policy)
         if logger:
+            label = result.get("decision", "ok" if result.get("ok") else "fail")
             logger.info(
-                "validator %s: %s (%s)",
+                "validator %s: %s%s (%s)",
                 result["name"],
-                "ok" if result["ok"] else "FAIL",
+                label,
+                "" if result.get("ok") else " -> blocked",
                 result.get("detail", ""),
             )
         results.append(result)

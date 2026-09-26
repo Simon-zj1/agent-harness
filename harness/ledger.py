@@ -105,9 +105,24 @@ CREATE TABLE IF NOT EXISTS validations (
     detail TEXT,
     metrics_json TEXT,
     failures_json TEXT,
+    -- Typed-decision columns. `ok` alone cannot distinguish "verified" from
+    -- "could not verify", which is exactly the gap that let fabricated URLs
+    -- through. decision/failure_class make the uncertainty countable.
+    decision TEXT,
+    failure_class TEXT,
+    evidence_json TEXT,
+    policy_action TEXT,
     PRIMARY KEY (run_id, name)
 );
 """
+
+# Columns added after the first release; existing ledgers are migrated in place.
+_VALIDATION_MIGRATIONS: tuple[tuple[str, str], ...] = (
+    ("decision", "TEXT"),
+    ("failure_class", "TEXT"),
+    ("evidence_json", "TEXT"),
+    ("policy_action", "TEXT"),
+)
 
 
 @dataclass
@@ -158,8 +173,21 @@ class Ledger:
         self._conn.execute("PRAGMA busy_timeout=10000")
         self._conn.execute("PRAGMA foreign_keys=ON")
         self._conn.executescript(SCHEMA)
+        self._migrate()
         self._conn.commit()
         _OPEN.append(self)
+
+    def _migrate(self) -> None:
+        """Add columns introduced after a ledger was first created."""
+        existing = {
+            row["name"]
+            for row in self._conn.execute("PRAGMA table_info(validations)")
+        }
+        for column, column_type in _VALIDATION_MIGRATIONS:
+            if column not in existing:
+                self._conn.execute(
+                    f"ALTER TABLE validations ADD COLUMN {column} {column_type}"
+                )
 
     # -- runs ---------------------------------------------------------------
     def insert_run(self, row: RunRow) -> None:
@@ -260,6 +288,7 @@ class Ledger:
         task: str | None = None,
         limit: int = 20,
         experiment: str | None = None,
+        experiment_prefix: str | None = None,
     ) -> list[RunRow]:
         clauses, params = [], []
         if task:
@@ -268,6 +297,9 @@ class Ledger:
         if experiment:
             clauses.append("experiment=?")
             params.append(experiment)
+        if experiment_prefix:
+            clauses.append("experiment LIKE ?")
+            params.append(f"{experiment_prefix}%")
         where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
         cur = self._conn.execute(
             f"SELECT * FROM runs {where} ORDER BY started_at DESC LIMIT ?",
@@ -389,11 +421,16 @@ class Ledger:
     def record_validation(self, run_id: str, result: dict[str, Any]) -> None:
         self._conn.execute(
             """
-            INSERT INTO validations (run_id, name, ok, detail, metrics_json, failures_json)
-            VALUES (?,?,?,?,?,?)
+            INSERT INTO validations (
+                run_id, name, ok, detail, metrics_json, failures_json,
+                decision, failure_class, evidence_json, policy_action
+            )
+            VALUES (?,?,?,?,?,?,?,?,?,?)
             ON CONFLICT(run_id, name) DO UPDATE SET
                 ok=excluded.ok, detail=excluded.detail,
-                metrics_json=excluded.metrics_json, failures_json=excluded.failures_json
+                metrics_json=excluded.metrics_json, failures_json=excluded.failures_json,
+                decision=excluded.decision, failure_class=excluded.failure_class,
+                evidence_json=excluded.evidence_json, policy_action=excluded.policy_action
             """,
             (
                 run_id,
@@ -402,6 +439,10 @@ class Ledger:
                 result.get("detail"),
                 json.dumps(result.get("metrics", {}), ensure_ascii=False),
                 json.dumps(result.get("failures", []), ensure_ascii=False),
+                result.get("decision"),
+                result.get("failure_class"),
+                json.dumps(result.get("evidence", []), ensure_ascii=False),
+                result.get("policy_action"),
             ),
         )
         self._conn.commit()

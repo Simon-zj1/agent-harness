@@ -8,8 +8,13 @@ from pathlib import Path
 
 from harness import validators
 
-REAL_CONTENT = Path("/Users/simon-zj/Documents/ChatGPT/daily-trends/data/2026-09-22.json")
-REAL_RAW = Path("/Users/simon-zj/Documents/ChatGPT/daily-trends/data/raw/2026-09-22.json")
+# Frozen fixture rather than the live capture. The live file is rewritten by the
+# fetch step, and a test that silently changes its own ground truth is worse than
+# no test: an earlier version of this suite started failing only because a
+# dry-run had refreshed the capture underneath it.
+FIXTURES = Path(__file__).resolve().parent / "fixtures" / "daily-trends-2026-09-25"
+REAL_CONTENT = FIXTURES / "content.json"
+REAL_RAW = FIXTURES / "raw.json"
 
 
 def _content() -> dict:

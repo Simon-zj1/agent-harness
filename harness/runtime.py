@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import Any
 from zoneinfo import ZoneInfo
 
-from . import memory, paths, taskspec, validators as validators_mod
+from . import decisions, memory, paths, taskspec, validators as validators_mod
 from .config import AgentConfig, load as load_config
 from .errors import HarnessError, LockBusy, StepFailed, ValidationFailed
 from .ledger import Ledger, RunRow, now_iso
@@ -251,9 +251,14 @@ class Runner:
                 run_dir=run_dir,
                 extra=task.vars(date=target_date, run_dir=run_dir),
                 logger=log,
+                policy=decisions.DecisionPolicy.from_table(task.policy),
             )
             for result in validation_results:
                 self.ledger.record_validation(run_id, result)
+            # A run-level verdict so the ledger can answer "how often was this
+            # run blocked by something we could not verify?" without re-parsing
+            # every validator payload.
+            metrics["verification"] = decisions.combine(validation_results)
             required_failed = [
                 result
                 for result, spec in zip(validation_results, task.validators)
