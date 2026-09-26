@@ -72,8 +72,15 @@ class ValidatorTests(unittest.TestCase):
             validators.get("does_not_exist")
 
     def test_real_sitemap_passes_the_drift_gate(self) -> None:
+        """A real hexo-generator-sitemap output, frozen as a fixture.
+
+        This used to read the author's live site checkout by absolute path, so it
+        could not pass anywhere else - CI caught it. The property under test is
+        "the shipped generator's baseline whitespace is tolerated", and a frozen
+        copy tests exactly that while remaining portable.
+        """
         result = validators.sitemap_sane(
-            "/Users/simon-zj/Documents/ChatGPT/个人网站/sitemap.xml"
+            Path(__file__).resolve().parent / "fixtures" / "sitemap-hexo-baseline.xml"
         )
         self.assertTrue(result["ok"], result.get("failures"))
         self.assertGreater(result["metrics"]["urls"], 0)

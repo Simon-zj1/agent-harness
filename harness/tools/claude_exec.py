@@ -25,14 +25,13 @@ def build(ctx: ToolContext, *, config: AgentConfig, sandboxed: bool = True) -> l
         if executor is None:
             raise ToolError("no [executors.claude] section in the config")
         binary = shutil.which(executor.command)
-        if binary is None:
-            raise ToolError(f"executor binary not found: {executor.command}")
         workdir_path = Path(workdir).expanduser()
         if not workdir_path.is_dir():
             raise ToolError(f"workdir does not exist: {workdir_path}")
 
         argv = [
-            binary,
+            # Keep the planned argv readable in dry-run without the binary.
+            binary or executor.command,
             "-p",
             prompt,
             "--output-format",
@@ -48,6 +47,11 @@ def build(ctx: ToolContext, *, config: AgentConfig, sandboxed: bool = True) -> l
 
         if ctx_.dry_run and ctx_.data.get("executor_dry_run_blocks", True):
             return {"argv": argv, "dry_run": True, "executed": False}
+
+        # Only a real invocation needs the binary; see codex_exec for why this
+        # check cannot come first.
+        if binary is None:
+            raise ToolError(f"executor binary not found: {executor.command}")
 
         timeout = timeout_sec or executor.timeout_sec
         try:

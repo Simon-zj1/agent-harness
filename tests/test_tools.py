@@ -120,6 +120,47 @@ class ToolPermissionTests(unittest.TestCase):
         self.assertFalse(result["executed"])
         self.assertIn("exec", result["argv"])
 
+    def test_dry_run_does_not_require_the_executor_to_be_installed(self) -> None:
+        """Dry-run is for machines that do not have the executor.
+
+        The binary lookup used to run before the dry-run short-circuit, so
+        `codex_exec` raised `executor binary not found` on any clean checkout -
+        which is the one situation dry-run exists for. CI caught it.
+        """
+        self.config.executors["codex"].command = "definitely-not-installed-xyz"
+        self.config.executors["claude"].command = "definitely-not-installed-xyz"
+        ctx = ToolContext(
+            run_id="run-dry",
+            run_dir=self.run_dir,
+            task_name="demo",
+            target_date="2026-09-25",
+            dry_run=True,
+            writable_paths=[self.writable],
+        )
+        registry = build_registry(ctx, config=self.config)
+        for tool in ("codex_exec", "claude_exec"):
+            with self.subTest(tool=tool):
+                result = registry.call(
+                    tool, {"prompt": "hello", "workdir": str(self.writable)}
+                )
+                self.assertFalse(result["executed"])
+                self.assertEqual(result["argv"][0], "definitely-not-installed-xyz")
+
+    def test_a_real_run_still_refuses_a_missing_executor(self) -> None:
+        """The check moved, it was not deleted."""
+        self.config.executors["codex"].command = "definitely-not-installed-xyz"
+        ctx = ToolContext(
+            run_id="run-live",
+            run_dir=self.run_dir,
+            task_name="demo",
+            target_date="2026-09-25",
+            dry_run=False,
+            writable_paths=[self.writable],
+        )
+        registry = build_registry(ctx, config=self.config)
+        with self.assertRaises(ToolError):
+            registry.call("codex_exec", {"prompt": "hello", "workdir": str(self.writable)})
+
     def test_freeform_urls_are_rejected_by_http_tool(self) -> None:
         with self.assertRaises(ToolError):
             self.registry.call("http_get", {"url": "file:///etc/passwd"})

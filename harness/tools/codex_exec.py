@@ -30,15 +30,15 @@ def build(ctx: ToolContext, *, config: AgentConfig, sandboxed: bool = True) -> l
         if executor is None:
             raise ToolError("no [executors.codex] section in the config")
         binary = shutil.which(executor.command)
-        if binary is None:
-            raise ToolError(f"executor binary not found: {executor.command}")
         workdir_path = Path(workdir).expanduser()
         if not workdir_path.is_dir():
             raise ToolError(f"workdir does not exist: {workdir_path}")
 
         out_file = ctx_.run_dir / "codex-last-message.txt"
         argv = [
-            binary,
+            # Falling back to the configured name keeps the planned argv readable
+            # in dry-run on a machine where the executor is not installed.
+            binary or executor.command,
             "exec",
             "-C",
             str(workdir_path),
@@ -58,6 +58,12 @@ def build(ctx: ToolContext, *, config: AgentConfig, sandboxed: bool = True) -> l
 
         if ctx_.dry_run and ctx_.data.get("executor_dry_run_blocks", True):
             return {"argv": argv, "dry_run": True, "executed": False}
+
+        # Only a real invocation needs the binary. Requiring it earlier made
+        # dry-run fail on any machine without the executor installed, which is
+        # exactly the machine dry-run exists for.
+        if binary is None:
+            raise ToolError(f"executor binary not found: {executor.command}")
 
         timeout = timeout_sec or executor.timeout_sec
         try:
