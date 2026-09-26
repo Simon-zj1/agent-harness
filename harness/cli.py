@@ -216,6 +216,13 @@ def build_parser() -> argparse.ArgumentParser:
         help="probe group (default: all); currently: refund",
     )
     v_probes.set_defaults(_handler=cmd_verify_probes)
+    v_content = ver_sub.add_parser(
+        "content", help="content debt across days (read-only diagnosis)"
+    )
+    v_content.add_argument(
+        "--days", action="append", default=None, help="YYYY-MM-DD (repeatable)"
+    )
+    v_content.set_defaults(_handler=cmd_verify_content)
     return parser
 
 
@@ -609,6 +616,33 @@ def cmd_verify_probes(args: argparse.Namespace) -> int:
     )
     log.info(f"report: {outdir / 'report.md'}")
     return EXIT_OK if report["ok"] else EXIT_FAIL
+
+
+def cmd_verify_content(args: argparse.Namespace) -> int:
+    log = console()
+    days = args.days or verification_eval.available_days()
+    if not days:
+        log.error("no day has both a capture and a composed article")
+        return EXIT_FAIL
+    report = verification_eval.content_debt(days)
+    outdir = paths.runs_dir() / "verification" / "content-debt"
+    outdir.mkdir(parents=True, exist_ok=True)
+    (outdir / "report.md").write_text(
+        verification_eval.content_debt_markdown(report), encoding="utf-8"
+    )
+    (outdir / "report.json").write_text(
+        json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8"
+    )
+    for row in report["rows"]:
+        flag = "ok  " if row["clean"] else "FAIL"
+        log.info(
+            f"  {flag} {row['day']}  ratio={row['verifiable_ratio']} "
+            f"fail={row['fail']} orphans={row['orphan_references']} "
+            f"blockers={','.join(row['blockers']) or '-'}"
+        )
+    log.info(f"干净 {report['clean']}/{report['days']} 天")
+    log.info(f"report: {outdir / 'report.md'}")
+    return EXIT_OK
 
 
 def cmd_verify_corpus(args: argparse.Namespace) -> int:

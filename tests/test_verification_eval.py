@@ -282,6 +282,41 @@ class CorpusSerialisationTests(unittest.TestCase):
         self.assertEqual(json.loads(json.dumps(reloaded)), corpus)
 
 
+@unittest.skipUnless(_has_data(), "no daily-trends captures to diagnose")
+class ContentDebtTests(unittest.TestCase):
+    """Diagnosis only — history is reported, never silently rewritten."""
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.report = ve.content_debt(ve.available_days())
+
+    def test_every_day_is_accounted_for(self) -> None:
+        self.assertEqual(self.report["days"], len(ve.available_days()))
+        self.assertEqual(
+            self.report["clean"] + self.report["dirty"], self.report["days"]
+        )
+
+    def test_clean_and_dirty_are_decided_by_the_gates(self) -> None:
+        for row in self.report["rows"]:
+            with self.subTest(day=row["day"]):
+                self.assertEqual(row["clean"], not row["blockers"])
+                for gate in ("structure", "references", "verifiable"):
+                    if row[gate] is False:
+                        self.assertIn(gate, row["blockers"])
+
+    def test_markdown_names_the_blocking_gate(self) -> None:
+        text = ve.content_debt_markdown(self.report)
+        self.assertIn("历史内容债", text)
+        for row in self.report["rows"]:
+            self.assertIn(row["day"], text)
+        self.assertIn("只做诊断", text)
+
+    def test_a_day_with_no_capture_is_skipped_not_guessed(self) -> None:
+        report = ve.content_debt(["1999-01-01"])
+        self.assertEqual(report["days"], 0)
+        self.assertEqual(report["rows"], [])
+
+
 class BaselineRegressionTests(unittest.TestCase):
     """A gate that quietly gets worse while every test passes is the failure
     mode this whole module exists to prevent."""

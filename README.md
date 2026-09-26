@@ -173,6 +173,30 @@ $ ./agent report 2026-09-22-daily-trends-141800-ff91b7
 写进台账并持久化，所以一次失败是可复查、可交接、可被后续修复步骤消费的，而不是
 一句 exit 1。
 
+### 历史内容债
+
+闸门在运行当时拦截。但在此之前的每一天已经发出去了，那些内容按现在的标准是过不了的。
+把它们一次看清，而不是靠一次失败的运行去发现：
+
+```bash
+./agent verify content
+```
+
+```
+  FAIL 2026-09-20  ratio=0.8806 fail=8  orphans=1 blockers=references,verifiable
+  ok   2026-09-21  ratio=1.0    fail=0  orphans=0 blockers=-
+  FAIL 2026-09-22  ratio=0.5957 fail=19 orphans=0 blockers=verifiable
+  FAIL 2026-09-23  ratio=1.0    fail=0  orphans=2 blockers=references
+  FAIL 2026-09-24  ratio=1.0    fail=0  orphans=2 blockers=references
+  ok   2026-09-25  ratio=1.0    fail=0  orphans=0 blockers=-
+干净 2/6 天
+```
+
+`ratio` 掉下来有两种成因，报告里要求分开看：引用确实不在当天抓取里，或者那天的抓取
+文件被后续运行覆盖过（`fetch` 曾在 dry-run 下也执行）。后者是可复现性事故，不是内容问题。
+
+这个命令**只诊断，不改已发布内容**——是否回修历史稿件是编辑决定。
+
 要自己复现这三行：
 
 ```bash

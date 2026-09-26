@@ -377,6 +377,92 @@ def available_days(*, root: Path | None = None) -> list[str]:
     return days
 
 
+def content_debt(days: Iterable[str], *, root: Path | None = None) -> dict[str, Any]:
+    """Run the content gates across days and report what is still broken.
+
+    The gate blocks a run at the time it happens. That leaves history: days that
+    were published before the gate got strict, and whose content the current
+    gate would reject. This turns that backlog into one table instead of a
+    discovery you make one failed run at a time.
+    """
+    from . import validators as validators_mod
+
+    base = root or data_dir()
+    rows: list[dict[str, Any]] = []
+    for day in days:
+        content = base / f"{day}.json"
+        raw = base / "raw" / f"{day}.json"
+        if not content.is_file() or not raw.is_file():
+            continue
+        structure = validators_mod.daily_trends_structure(content)
+        references = validators_mod.daily_trends_references(content)
+        verifiable = validators_mod.daily_trends_verifiable(content, raw)
+        blockers = [
+            name
+            for name, result in (
+                ("structure", structure),
+                ("references", references),
+                ("verifiable", verifiable),
+            )
+            if not result.get("ok")
+        ]
+        rows.append(
+            {
+                "day": day,
+                "structure": structure.get("ok"),
+                "references": references.get("ok"),
+                "verifiable": verifiable.get("ok"),
+                "verifiable_ratio": (verifiable.get("metrics") or {}).get(
+                    "verifiable_ratio"
+                ),
+                "cannot_verify": (verifiable.get("metrics") or {}).get("cannot_verify"),
+                "fail": (verifiable.get("metrics") or {}).get("fail"),
+                "orphan_references": (references.get("metrics") or {}).get("orphans"),
+                "blockers": blockers,
+                "clean": not blockers,
+            }
+        )
+    dirty = [row for row in rows if not row["clean"]]
+    return {
+        "generated_at": dt.datetime.now().astimezone().isoformat(timespec="seconds"),
+        "days": len(rows),
+        "clean": len(rows) - len(dirty),
+        "dirty": len(dirty),
+        "rows": rows,
+    }
+
+
+def content_debt_markdown(report: dict[str, Any]) -> str:
+    lines = [
+        "# 历史内容债",
+        "",
+        f"- 检查 {report['days']} 天：{report['clean']} 天通过全部内容闸门，{report['dirty']} 天未通过",
+        f"- 生成时间：{report['generated_at']}",
+        "",
+        "| 日期 | 结构 | 引用 | 可核验 | 可核验率 | 无法核验 | 失败 | 孤儿引用 | 卡在哪 |",
+        "| --- | --- | --- | --- | --- | --- | --- | --- | --- |",
+    ]
+    for row in report["rows"]:
+        mark = lambda ok: "ok" if ok else "**FAIL**"  # noqa: E731
+        ratio = row["verifiable_ratio"]
+        lines.append(
+            f"| {row['day']} | {mark(row['structure'])} | {mark(row['references'])} | "
+            f"{mark(row['verifiable'])} | {'—' if ratio is None else f'{ratio:.2f}'} | "
+            f"{row['cannot_verify']} | {row['fail']} | {row['orphan_references']} | "
+            f"{', '.join(row['blockers']) or '—'} |"
+        )
+    lines += [
+        "",
+        "## 说明",
+        "",
+        "- 这张表只做诊断，不改已发布内容。是否回修历史稿件是编辑决定，不是工程决定。",
+        "- 可核验率下降有两种原因，需要分开看：引用确实不在当天抓取里，或当天的抓取文件",
+        "  被后续运行覆盖过（`fetch` 曾经在 dry-run 下也执行）。后者属于可复现性事故。",
+        "",
+    ]
+    return "\n".join(lines)
+
+
 # ---------------------------------------------------------------------------
 # Matchers
 # ---------------------------------------------------------------------------

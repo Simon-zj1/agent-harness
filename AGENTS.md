@@ -32,6 +32,7 @@ python3 -m unittest discover -t . -s tests -v
 ./agent run daily-trends --date 2026-09-25 --compose replay --dry-run
 ./agent verify eval
 ./agent verify probes
+./agent verify content
 ```
 
 `-t .` 是必需的：测试用相对导入（`from .helpers import ...`），不指定顶层目录会直接
