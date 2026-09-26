@@ -33,8 +33,14 @@ prompt_dir = "prompts"
 repair_rounds = 1
 
 [publish]
-# Safety default: a manual run never pushes unless you pass --publish.
+# Disabled on purpose. This used to push from the 个人网站 checkout, but that
+# clone has diverged: its HEAD would delete ~790 lines of
+# tech/papers/rrsi-harness-rsi and other pages that arrived via hexo deploys.
+# The trends pages do not need it either - scripts/daily-trends.js generates
+# them during `hexo generate`, so the site already ships them.
+# Re-enable only after the checkout is re-synced with the Pages repo.
 default_enabled = false
+disabled_reason = "个人网站 checkout diverged; its push would delete live content"
 
 [policy]
 # Fail-closed. A reference that cannot be traced back to today's raw capture
@@ -54,7 +60,7 @@ add = ["trends", "css/trends.css", "tech/index.html", "sitemap.xml"]
 [trigger]
 type = "launchd"
 label = "com.simonzj.agent.daily-trends"
-publish = true
+publish = false
 calendar = [{ hour = 23, minute = 0 }]
 
 [[steps]]
