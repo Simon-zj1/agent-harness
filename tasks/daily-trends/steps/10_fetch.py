@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import json
+from datetime import date as _date
 
 from harness import stepctx
 
@@ -13,6 +14,20 @@ def main() -> int:
     tools = ctx.path("{tools_dir}")
     script = tools / "tools" / "fetch_sources.py"
     raw_path = tools / "data" / "raw" / f"{ctx.target_date}.json"
+
+    # A capture for a past date is evidence, not a cache. Re-fetching it replaces
+    # the only record of what the day actually looked like, and every citation in
+    # that day's article was verified against it. This has already cost one day
+    # (2026-09-22, overwritten by a run that looked harmless), so a past date with
+    # an existing capture is left alone. Today's capture may still be refreshed.
+    if raw_path.is_file() and ctx.target_date != _date.today().isoformat():
+        return stepctx.finish(
+            ctx,
+            "ok",
+            artifacts=[str(raw_path)],
+            metrics={**_counts(raw_path), "refetched": 0},
+            notes=f"沿用 {ctx.target_date} 已有抓取（历史日期的 raw 视为证据，不重新抓取）",
+        )
 
     if not script.is_file():
         return stepctx.fail(ctx, f"找不到抓取脚本：{script}")

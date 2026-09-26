@@ -78,6 +78,28 @@ def main() -> int:
             notes="dry-run：已归一化引用并生成预览，未写站点仓库",
         )
 
+    if not ctx.publish:
+        # Publishing from this task is disabled (see [publish] in task.toml:
+        # the 个人网站 checkout is a second writer on the same Pages branch and
+        # the hexo build already ships trends/*). Writing into that checkout
+        # anyway is what re-dirtied it and caused a 792-line deletion, so the
+        # site writes now stay in the run directory.
+        try:
+            page = _render_sandboxed(
+                ctx, tools=tools, content=content, sandbox_hexo_data=False
+            )
+        except Exception as exc:  # noqa: BLE001 - report, do not crash
+            return stepctx.fail(ctx, f"沙箱渲染失败：{exc}")
+        artifacts.append(str(page))
+        metrics["site_write"] = 0
+        return stepctx.finish(
+            ctx,
+            "ok",
+            artifacts=artifacts,
+            metrics=metrics,
+            notes="未启用发布：只更新首页速览，站点文件留在 run 目录，未写站点仓库",
+        )
+
     render = ctx.registry.call(
         "shell_run",
         {
@@ -121,8 +143,15 @@ def main() -> int:
     )
 
 
-def _render_preview(ctx, *, tools: Path, content: dict) -> Path:
-    """Render into the run directory by patching the official renderer's roots."""
+def _render_sandboxed(ctx, *, tools: Path, content: dict, sandbox_hexo_data: bool) -> Path:
+    """Render into the run directory by patching the official renderer's roots.
+
+    `sandbox_hexo_data=False` deliberately leaves HEXO_DATA pointing at the real
+    blog checkout. That single file (`source/_data/ai_briefing.json`) is the
+    homepage digest widget and nothing else produces it - `scripts/daily-trends.js`
+    only merges the sitemap. Everything else, including every file under the site
+    repo, stays inside the run directory.
+    """
     preview_root = ctx.run_dir / "site-preview"
     data_dir = ctx.run_dir / "preview-data"
     data_dir.mkdir(parents=True, exist_ok=True)
@@ -133,13 +162,14 @@ def _render_preview(ctx, *, tools: Path, content: dict) -> Path:
     module = _load_module(tools / "tools" / "render_site.py", "daily_trends_render_site")
     module.DATA_DIR = data_dir
     module.ARTIFACT_ROOT = preview_root / "artifacts"
-    module.HEXO_SOURCE = preview_root / "hexo-source"
-    # HEXO_DATA is derived from HEXO_SOURCE at import time, so patching the
-    # source alone left it pointing at the real blog checkout: preview runs
-    # silently rewrote <blog>/source/_data/ai_briefing.json, and the
-    # relative_to(HEXO_SOURCE) in the renderer then crashed on the mismatched
-    # path. Rebinding it keeps every write inside the preview root.
-    module.HEXO_DATA = module.HEXO_SOURCE / "_data"
+    if sandbox_hexo_data:
+        module.HEXO_SOURCE = preview_root / "hexo-source"
+        # HEXO_DATA is derived from HEXO_SOURCE at import time, so patching the
+        # source alone left it pointing at the real blog checkout: preview runs
+        # silently rewrote <blog>/source/_data/ai_briefing.json, and the
+        # relative_to(HEXO_SOURCE) in the renderer then crashed on the mismatched
+        # path. Rebinding it keeps every write inside the preview root.
+        module.HEXO_DATA = module.HEXO_SOURCE / "_data"
     module.SITE_ROOT = preview_root
     module.TRENDS_DIR = preview_root / "trends"
     module.TECH_INDEX = preview_root / "tech" / "index.html"
@@ -156,8 +186,12 @@ def _render_preview(ctx, *, tools: Path, content: dict) -> Path:
     finally:
         sys.argv = argv
     if code != 0:
-        raise RuntimeError(f"preview render returned {code}")
+        raise RuntimeError(f"render returned {code}")
     return preview_root / "trends" / ctx.target_date / "index.html"
+
+
+def _render_preview(ctx, *, tools: Path, content: dict) -> Path:
+    return _render_sandboxed(ctx, tools=tools, content=content, sandbox_hexo_data=True)
 
 
 def _seed_shell(preview_root: Path) -> Path:
