@@ -649,6 +649,18 @@ def cmd_doctor(args: argparse.Namespace) -> int:
                     f"{name}: readable path does not exist: {resolved} "
                     f"(set the task's environment override or clone the dependency)"
                 )
+        if str((task.trigger or {}).get("type", "")).lower() == "launchd":
+            try:
+                trigger_status = launchd.status(task)
+            except FileNotFoundError:
+                log.info(f"launchd {name:<12}: unavailable on this platform")
+            except Exception as exc:  # noqa: BLE001 - report, don't crash doctor
+                problems.append(f"{name}: launchd status failed: {exc}")
+            else:
+                log.info(
+                    f"launchd {name:<12}: "
+                    f"{'loaded' if trigger_status.get('loaded') else 'not loaded'}"
+                )
 
     ledger = Ledger()
     log.info(f"ledger      : {ledger.path}")

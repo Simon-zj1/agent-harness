@@ -286,6 +286,25 @@ class NotificationTests(unittest.TestCase):
         self.assertIn("delivered", result)
         self.assertFalse(result["delivered"]["macos"])
 
+    def test_notification_webhook_host_must_be_allowlisted(self) -> None:
+        self.config.notify.webhook_allow_hosts = ["allowed.example"]
+        ctx = ToolContext(
+            run_id="run-6",
+            run_dir=self.run_dir,
+            task_name="demo",
+            target_date="2026-09-22",
+        )
+        registry = build_registry(ctx, config=self.config)
+        with self.assertRaises(PermissionDenied):
+            registry.call(
+                "notify",
+                {
+                    "title": "t",
+                    "message": "m",
+                    "webhook": "https://blocked.example/hook",
+                },
+            )
+
 
 if __name__ == "__main__":
     unittest.main()

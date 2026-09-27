@@ -4,9 +4,11 @@ from __future__ import annotations
 
 import json
 import subprocess
+import urllib.parse
 import urllib.request
 
 from ..config import AgentConfig
+from ..errors import PermissionDenied, ToolError
 from ..registry import Tool, ToolContext, schema
 
 
@@ -20,6 +22,16 @@ def build(ctx: ToolContext, *, config: AgentConfig, sandboxed: bool = True) -> l
     ) -> dict:
         target = webhook if webhook is not None else config.notify.webhook
         planned = {"title": title, "message": message, "subtitle": subtitle, "webhook": bool(target)}
+        if target:
+            parsed = urllib.parse.urlparse(target)
+            if parsed.scheme not in ("http", "https"):
+                raise ToolError(f"notify webhook must be http(s): {target!r}")
+            allowed = set(config.notify.webhook_allow_hosts or [])
+            if allowed and parsed.hostname not in allowed:
+                raise PermissionDenied(
+                    f"notify webhook host {parsed.hostname!r} is not in "
+                    f"webhook_allow_hosts={sorted(allowed)}"
+                )
 
         if ctx_.dry_run or not config.notify.enabled:
             return {**planned, "delivered": False, "reason": "dry-run or notify disabled"}

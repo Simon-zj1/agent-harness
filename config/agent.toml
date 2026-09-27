@@ -16,11 +16,15 @@ step_retries = 1
 # Hard monthly ceiling for paid-model runs. Cost is only measured when provider
 # unit prices are set, so this is a lower bound, not a billing guarantee.
 monthly_limit_usd = 20.0
+# Fail the compose step before it writes/publishes if a single run's measured
+# model cost exceeds this conservative ceiling.
+max_cost_per_run_usd = 1.0
 
 [notify]
 enabled = true
 macos = true
 webhook = ""
+webhook_allow_hosts = []
 # failure | always
 on = "failure"
 

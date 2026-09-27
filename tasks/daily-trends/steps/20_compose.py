@@ -152,6 +152,9 @@ def _llm_chunked(ctx, *, raw_path: Path, content_path: Path) -> int:
     if cost_usd is not None:
         metrics["cost_usd"] = cost_usd
     metrics.update(_metrics(content_path, raw_path))
+    budget_problem = _run_budget_problem(ctx, cost_usd)
+    if budget_problem:
+        return stepctx.fail(ctx, budget_problem, metrics=metrics)
     if not failures:
         _accept_content(ctx, content)
     if failures:
@@ -563,6 +566,9 @@ def _llm(ctx, *, raw_path: Path, content_path: Path, tools: Path) -> int:
     if cost_usd is not None:
         metrics["cost_usd"] = cost_usd
     metrics.update(_metrics(content_path, raw_path))
+    budget_problem = _run_budget_problem(ctx, cost_usd)
+    if budget_problem:
+        return stepctx.fail(ctx, budget_problem, metrics=metrics)
     _accept_content(ctx, content)
     if failures:
         return stepctx.degrade(
@@ -626,6 +632,9 @@ def _delegate(ctx, *, raw_path: Path, content_path: Path, tools: Path) -> int:
     content = json.loads(content_path.read_text(encoding="utf-8"))
     failures = _check(ctx, content, raw_path=raw_path, content_path=content_path)
     metrics.update(_metrics(content_path, raw_path))
+    budget_problem = _run_budget_problem(ctx, metrics.get("cost_usd"))
+    if budget_problem:
+        return stepctx.fail(ctx, budget_problem, metrics=metrics)
     _accept_content(ctx, content)
     if failures:
         return stepctx.degrade(
@@ -644,6 +653,18 @@ def _delegate(ctx, *, raw_path: Path, content_path: Path, tools: Path) -> int:
 
 
 # -- helpers ---------------------------------------------------------------
+def _run_budget_problem(ctx, cost_usd) -> str:
+    limit = ctx.config.budget.max_cost_per_run_usd
+    if limit is None or cost_usd is None:
+        return ""
+    if float(cost_usd) > float(limit):
+        return (
+            f"单次运行成本 ${float(cost_usd):.4f} 超过 max_cost_per_run_usd "
+            f"${float(limit):.2f}；未写入正式内容存储"
+        )
+    return ""
+
+
 def _accept_content(ctx, content: dict) -> None:
     """Copy into the canonical content store unless this is an experiment arm."""
     if not ctx.tool_ctx.data.get("accept_content", True):

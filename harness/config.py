@@ -54,6 +54,7 @@ class BudgetConfig:
     step_retries: int = 1
     max_tokens: int | None = None
     monthly_limit_usd: float | None = None
+    max_cost_per_run_usd: float | None = None
 
 
 @dataclass
@@ -62,6 +63,7 @@ class NotifyConfig:
     macos: bool = True
     webhook: str = ""
     on: str = "failure"
+    webhook_allow_hosts: list[str] = field(default_factory=list)
 
 
 @dataclass
