@@ -27,16 +27,17 @@ on = "failure"
 [providers.deepseek]
 type = "openai_compat"
 base_url = "https://api.deepseek.com/v1"
-model = "deepseek-chat"
+model = "deepseek-flash"
 api_key_env = "DEEPSEEK_API_KEY"
 timeout_sec = 300
 max_retries = 2
 temperature = 0.3
-# Third-party DeepSeek pricing estimate (Aug 2026). Keep as an assumption until
-# confirmed against the official pricing page; token counts stay recorded even
-# if these are changed.
-input_per_mtok = 0.28
-output_per_mtok = 0.42
+# Official DeepSeek pricing (2026-09-27): cache-miss input is $0.15/$0.30 per
+# Mtok off-peak/peak; output is $0.60/$1.20. We use the peak cache-miss price
+# as a conservative budget estimate. Cache-hit pricing is cheaper and is not
+# modeled here, so this is an upper bound for normal calls, not a bill.
+input_per_mtok = 0.30
+output_per_mtok = 1.20
 
 # Local model adapter (not used by default). M1 Pro / 16 GB realistically tops
 # out around 7-14B quantised models, so this is for offline or sensitive runs.

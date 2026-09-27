@@ -18,6 +18,7 @@ from harness.decisions import (
     classify_url,
     combine,
 )
+from harness.refund_guard import decide
 
 FIXTURES = Path(__file__).resolve().parent / "fixtures"
 COLLISION_RAW = FIXTURES / "prefix-collision" / "raw.json"
@@ -225,7 +226,7 @@ class RefundGuardTests(unittest.TestCase):
         cls.ledger = set(book["payment_ledger"])
         cls.policy = book["policy"]
         cls.orders = book["orders"]
-        cls.decide = staticmethod(module.decide)
+        cls.decide = staticmethod(decide)
 
     def test_eligible_order_is_approved(self) -> None:
         verdict = self.decide(self.orders[0], self.policy, self.ledger)
@@ -245,12 +246,23 @@ class RefundGuardTests(unittest.TestCase):
         self.assertIn("payment_reference", verdict["unverified_checks"])
 
     def test_validator_rejects_approving_an_unverifiable_refund(self) -> None:
+        checks = [
+            {"check": name, "decision": "pass", "detail": "stub"}
+            for name in ("order_status", "refund_window", "currency")
+        ] + [
+            {
+                "check": "payment_reference",
+                "decision": "cannot_verify",
+                "detail": "not found in ledger",
+            }
+        ]
         bad = {
             "results": [
                 {
                     "order_id": "ord_x",
                     "decision": "cannot_verify",
                     "action": "approve",
+                    "checks": checks,
                     "unverified_checks": ["payment_reference"],
                 }
             ]
@@ -280,6 +292,55 @@ class RefundGuardTests(unittest.TestCase):
                 os.environ.pop("AGENT_STEP_ID", None)
         self.assertTrue(result["ok"], result.get("failures"))
         self.assertEqual(result["metrics"]["cannot_verify"], 2)
+
+
+class GateCompletenessTests(unittest.TestCase):
+    """A gate must reject missing evidence, not only contradictory evidence."""
+
+    def test_pr_merge_gate_requires_all_three_judgements(self) -> None:
+        payload = {
+            "range": "HEAD~1..HEAD",
+            "scope": ["harness/"],
+            "checks": [
+                {"check": "TESTS_PASS", "decision": "pass", "detail": "ok"},
+                {"check": "ARCHITECTURE_OK", "decision": "pass", "detail": "ok"},
+            ],
+            "merge": "allow",
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "review.json"
+            path.write_text(json.dumps(payload), encoding="utf-8")
+            result = validators.pr_merge_gate(path)
+        self.assertFalse(result["ok"])
+        self.assertIn("missing required checks", result["detail"] + str(result["failures"]))
+
+    def test_refund_gate_recomputes_ground_truth(self) -> None:
+        orders = REFUND_STEP.parent.parent / "fixtures" / "orders.json"
+        checks = [
+            {"check": name, "decision": "pass", "detail": "fake"}
+            for name in ("order_status", "refund_window", "payment_reference", "currency")
+        ]
+        payload = {
+            "results": [
+                {
+                    "order_id": "ord_1002",
+                    "decision": "pass",
+                    "action": "approve",
+                    "checks": checks,
+                    "failed_checks": [],
+                    "unverified_checks": [],
+                }
+            ]
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "decisions.json"
+            path.write_text(json.dumps(payload), encoding="utf-8")
+            result = validators.refund_decisions_fail_closed(path, orders_path=orders)
+        # ord_1002 is out of the refund window, so an all-pass artifact is a
+        # fabricated decision. The other fixture orders are also missing.
+        self.assertFalse(result["ok"])
+        self.assertIn("decision mismatch", str(result["failures"]))
+        self.assertIn("missing decisions for orders", str(result["failures"]))
 
 
 if __name__ == "__main__":

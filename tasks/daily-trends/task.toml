@@ -14,17 +14,16 @@ allowed_tools = [
   "codex_exec", "claude_exec",
 ]
 
-readable_paths = ["{tools_dir}", "{site_repo}", "{blog_repo}"]
+readable_paths = ["{tools_dir}", "{site_repo}"]
 writable_paths = ["{tools_dir}/data", "{site_repo}"]
 
 [paths]
 # Repository-local sibling defaults (relative to tasks/daily-trends), so a fresh
 # checkout does not hard-code any one author's absolute home path. Override for
 # a different layout without editing this file:
-#   export DAILY_TRENDS_DIR=... SITE_REPO_DIR=... BLOG_REPO_DIR=...
+#   export DAILY_TRENDS_DIR=... SITE_REPO_DIR=...
 tools_dir = "${DAILY_TRENDS_DIR:-../../../daily-trends}"
 site_repo = "${SITE_REPO_DIR:-../../../个人网站}"
-blog_repo = "${BLOG_REPO_DIR:-../../../blog}"
 
 [context]
 # What `--compose` defaults to for unattended runs.

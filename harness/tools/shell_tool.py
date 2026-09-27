@@ -29,6 +29,7 @@ def build(ctx: ToolContext, *, config: AgentConfig, sandboxed: bool = True) -> l
         timeout_sec: int | None = None,
         allow_failure: bool = False,
         writes: list[str] | None = None,
+        env: dict[str, str] | None = None,
     ) -> dict:
         if not isinstance(argv, list) or not argv or not all(isinstance(a, str) for a in argv):
             raise ToolError("shell_run expects argv as a list of strings")
@@ -49,10 +50,14 @@ def build(ctx: ToolContext, *, config: AgentConfig, sandboxed: bool = True) -> l
                     f"command {program!r} may write but shell_run declares no writes; "
                     "add explicit writes=[...]"
                 )
+            declared_writes = [
+                _resolve_write_target(raw, workdir) for raw in writes
+            ]
             for raw in writes:
                 target = _resolve_write_target(raw, workdir)
                 if not ctx_.within_writable(target):
                     raise PermissionDenied(f"write outside declared paths: {target}")
+            _validate_path_args(program, argv, workdir, ctx_, declared_writes)
 
         if ctx_.dry_run and may_write:
             return {
@@ -64,12 +69,12 @@ def build(ctx: ToolContext, *, config: AgentConfig, sandboxed: bool = True) -> l
                 "returncode": 0,
             }
 
-        env = _clean_env()
+        child_env = _clean_env(env)
         try:
             proc = subprocess.run(
                 argv,
                 cwd=str(workdir),
-                env=env,
+                env=child_env,
                 capture_output=True,
                 text=True,
                 timeout=timeout,
@@ -101,12 +106,13 @@ def build(ctx: ToolContext, *, config: AgentConfig, sandboxed: bool = True) -> l
             ),
             input_schema=schema(
                 {
-                "argv": {"type": "array", "items": {"type": "string"}},
-                "cwd": {"type": "string"},
-                "timeout_sec": {"type": "integer"},
-                "allow_failure": {"type": "boolean"},
-                "writes": {"type": "array", "items": {"type": "string"}},
-            },
+                    "argv": {"type": "array", "items": {"type": "string"}},
+                    "cwd": {"type": "string"},
+                    "timeout_sec": {"type": "integer"},
+                    "allow_failure": {"type": "boolean"},
+                    "writes": {"type": "array", "items": {"type": "string"}},
+                    "env": {"type": "object"},
+                },
                 ["argv"],
             ),
             handler=shell_run,
@@ -116,7 +122,7 @@ def build(ctx: ToolContext, *, config: AgentConfig, sandboxed: bool = True) -> l
     ]
 
 
-def _clean_env() -> dict[str, str]:
+def _clean_env(extra: dict[str, str] | None = None) -> dict[str, str]:
     """Keep secrets out of child processes.
 
     Provider credentials are read by the provider layer, not inherited by
@@ -152,7 +158,9 @@ def _clean_env() -> dict[str, str]:
         "AGENT_CONTEXT_STRATEGY",
         "AGENT_MEMORY",
     }
-    return {k: v for k, v in os.environ.items() if k in keep}
+    cleaned = {k: v for k, v in os.environ.items() if k in keep}
+    cleaned.update({str(k): str(v) for k, v in (extra or {}).items()})
+    return cleaned
 
 
 _READ_ONLY_GIT = {
@@ -233,3 +241,55 @@ def _curl_may_write(argv: list[str]) -> bool:
             if index + 1 < len(argv):
                 method = argv[index + 1].upper()
     return method not in {"GET", "HEAD"}
+
+
+def _validate_path_args(
+    program: str,
+    argv: list[str],
+    workdir: Path,
+    ctx: ToolContext,
+    declared_writes: list[Path],
+) -> None:
+    """Check obvious filesystem arguments against the declared write scope.
+
+    This is intentionally a defense-in-depth check for the common destructive
+    commands, not an OS sandbox.  Interpreters and external executors still
+    require a narrower execution boundary if they are exposed to untrusted
+    content.
+    """
+    args = [arg for arg in argv[1:] if not arg.startswith("-")]
+    if not args:
+        return
+    if program in {"rm", "mkdir", "touch", "mv"}:
+        for arg in args:
+            target = _resolve_write_target(arg, workdir)
+            if not any(_is_within(target, root) for root in declared_writes):
+                raise PermissionDenied(
+                    f"{program} path is outside declared writes: {target}"
+                )
+        return
+    if program == "cp" and len(args) >= 2:
+        source = _resolve_write_target(args[0], workdir)
+        destination = _resolve_write_target(args[-1], workdir)
+        if not ctx.within_readable(source):
+            raise PermissionDenied(f"cp source is outside declared reads: {source}")
+        if not any(_is_within(destination, root) for root in declared_writes):
+            raise PermissionDenied(
+                f"cp destination is outside declared writes: {destination}"
+            )
+        return
+    if program == "sed" and any(arg == "-i" or (arg.startswith("-i") and arg != "-i") for arg in argv):
+        for arg in args[1:]:
+            target = _resolve_write_target(arg, workdir)
+            if not any(_is_within(target, root) for root in declared_writes):
+                raise PermissionDenied(
+                    f"sed -i path is outside declared writes: {target}"
+                )
+
+
+def _is_within(target: Path, root: Path) -> bool:
+    try:
+        target.expanduser().resolve().relative_to(root.expanduser().resolve())
+        return True
+    except ValueError:
+        return False

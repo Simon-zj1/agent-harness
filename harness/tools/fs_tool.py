@@ -24,7 +24,8 @@ def build(ctx: ToolContext, *, config: AgentConfig, sandboxed: bool = True) -> l
             raise PermissionDenied(f"read outside declared paths: {target}")
         if not target.is_file():
             raise FileNotFoundError(f"no such file: {target}")
-        text = target.read_text(encoding="utf-8", errors="replace")
+        with target.open("r", encoding="utf-8", errors="replace") as handle:
+            text = handle.read(max_bytes + 1)
         truncated = len(text) > max_bytes
         return {
             "path": str(target),
@@ -54,6 +55,8 @@ def build(ctx: ToolContext, *, config: AgentConfig, sandboxed: bool = True) -> l
 
     def fs_exists(ctx_: ToolContext, path: str) -> dict:
         target = _resolve(ctx_, path)
+        if sandboxed and not ctx_.within_readable(target):
+            raise PermissionDenied(f"stat outside declared paths: {target}")
         return {"path": str(target), "exists": target.exists(), "is_file": target.is_file()}
 
     return [

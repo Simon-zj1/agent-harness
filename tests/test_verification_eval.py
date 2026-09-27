@@ -373,6 +373,21 @@ class BaselineRegressionTests(unittest.TestCase):
         self.assertTrue(verdict["ok"])
         self.assertEqual(verdict["compared_matchers"], [])
 
+    def test_a_changed_corpus_is_not_reported_as_a_regression(self) -> None:
+        before = self._report(
+            typed={"false_pass_rate": 0.0, "false_fail_rate": 0.0}
+        )
+        before["corpus_fingerprint"] = "corpus-a"
+        baseline = ve.baseline_from(before)
+        after = self._report(
+            typed={"false_pass_rate": 0.1, "false_fail_rate": 0.0}
+        )
+        after["corpus_fingerprint"] = "corpus-b"
+        verdict = ve.check_baseline(after, baseline)
+        self.assertTrue(verdict["ok"])
+        self.assertTrue(verdict["corpus_changed"])
+        self.assertEqual(verdict["compared_matchers"], [])
+
     def test_baseline_round_trips_through_disk(self) -> None:
         import tempfile
 

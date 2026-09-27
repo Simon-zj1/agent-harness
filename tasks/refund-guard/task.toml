@@ -24,4 +24,4 @@ note = "确定性退款判定：订单状态 / 退款窗口 / 支付凭证 / 币
 
 [[validators]]
 name = "refund_decisions_fail_closed"
-args = { path = "{run_dir}/decisions.json" }
+args = { path = "{run_dir}/decisions.json", orders_path = "{task_dir}/fixtures/orders.json" }

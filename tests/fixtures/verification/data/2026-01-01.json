@@ -1,0 +1,17 @@
+{
+  "date": "2026-01-01",
+  "references": [
+    {"id": 1, "title": "fixture one", "url": "https://example.com/alpha"},
+    {"id": 2, "title": "fixture repo", "url": "https://github.com/fixture/repo"}
+  ],
+  "sections": [
+    {
+      "id": "insights",
+      "items": [{"title": {"zh": "x", "en": "x"}, "sources": [1]}]
+    },
+    {
+      "id": "github",
+      "items": [{"title": {"zh": "y", "en": "y"}, "sources": [2]}]
+    }
+  ]
+}

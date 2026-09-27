@@ -14,12 +14,16 @@
 cd /path/to/agent-harness
 ./agent doctor                                                     # 环境自检
 ./agent tasks                                                      # 已声明的任务
-./agent run daily-trends --date 2026-09-22 --compose replay --dry-run   # 免费冒烟
+./agent run daily-trends --date 2026-09-25 --compose replay --dry-run   # 免费冒烟
 ./agent status                                                     # 台账 / 记忆 / provider
 ./agent report <run_id>                                            # 单次运行详情
 ./agent verify corpus                                              # 从真实抓取构建标注语料
 ./agent verify eval                                                # 测量验收闸门自身的漏检率
 ```
+
+`verify corpus` / `verify eval` 依赖仓库外的 `daily-trends` 抓取数据。默认取本仓库
+同级的 `../daily-trends/data`，也可以用 `DAILY_TRENDS_DATA_DIR` 显式覆盖；`doctor`
+会检查任务声明的外部读取路径是否存在。
 
 ## 结构
 
@@ -56,7 +60,7 @@ memory/ runs/             记忆与运行产物（AGENT_HOME 可整体迁移）
 | --- | --- | --- |
 | 会话与记忆 | 会话在厂商的存储里，跨会话记忆弱 | `memory/` 全在本机，可 git、可审计、可删 |
 | 触发 | 你打开它才会跑 | launchd 定时/事件触发，无人值守 |
-| 权限 | 围绕工作目录 | 每个任务声明可写路径 + 命令白名单，工具调用全部入台账 |
+| 权限 | 围绕工作目录 | 外部写入声明可写路径 + 命令白名单；经 registry 的工具调用全部入台账 |
 | 验收 | 靠你读输出 | 校验器代码化，可核验率不达标就不发布 |
 | 模型 | 绑定某个 harness | provider 可换（DeepSeek/本地/其它）；自研 loop 目前是实验模块 |
 
@@ -73,6 +77,9 @@ scripts/install_launchd.sh daily-trends --load                      # 交给 lau
 
 `--load` 之前请确认 Codex 侧那条同任务的自动化已暂停：两条都跑会重复发布
 （harness 侧有站点仓库锁，但没必要让它们打架）。
+
+当前作者机器上的 `com.simonzj.agent.daily-trends` 并未加载；上面的命令是安装/启用步骤，
+不是“已经在无人值守运行”的证据。用 `./agent launchd status daily-trends` 查看真实状态。
 
 ## 实验台
 
@@ -108,27 +115,23 @@ scripts/install_launchd.sh daily-trends --load                      # 交给 lau
 
 | matcher | 漏检率（放行编造来源） | 误杀率（拦下真实引用） | 判「无法核验」 | 成本 |
 | --- | --- | --- | --- | --- |
-| legacy（旧布尔闸门） | 50.0% | 0.0% | 0.0% | 免费 |
-| typed（当前） | **0.0%** | **0.0%** | 28.6% | 免费 |
-| llm（LLM-as-judge） | 0.0% | 5.3% | 0.0% | 1,605,770 tok / 175 次 |
+| legacy（旧布尔闸门） | 62.1% | 0.6% | 0.0% | 免费 |
+| typed（当前） | **0.0%** | **0.0%** | 32.3% | 免费 |
+
+LLM 裁判只在 175 条子样本上运行过（1,605,770 input token / 175 次），不能和上面的
+930 条主表直接比较；它是历史对照，不是当前默认基线。
 
 分类别的判决（总漏检率会被易样本稀释，分类别不会）：
 
-| matcher | 前缀延伸 | 后缀伪造 | 跨天取证 | 完全无关 | 真实引用 | 可枚举漂移 | 真实未被引用 |
-| --- | --- | --- | --- | --- | --- | --- | --- |
-| legacy | pass×25 | pass×25 | fail×25 | fail×25 | pass×25 | pass×25 | pass×25 |
-| typed | **cannot_verify×25** | **cannot_verify×25** | fail×25 | fail×25 | pass×25 | pass×25 | pass×25 |
-| llm | fail×25 | fail×25 | fail×25 | fail×25 | pass×25 | **fail×4**, pass×21 | pass×25 |
+读法（这不是「谁赢」，是三种不同的代价）：
 
-读法（这三行不是「谁赢」，是三种不同的代价）：
-
-- **legacy 是真错**：共享前缀即判通过。它唯一能挡住的是"完全不在抓取里"的样本，
-  所以把跨天取证这类它本来就会的题加进语料，反而把它的总漏检率从 66.7% 稀释到 50%。
-- **typed 免费且零误杀**，代价是把两类前缀型攻击判成 `CANNOT_VERIFY` —— 而且**这些不确定性
-  全部落在攻击样本上，在 6 天真实内容里一次都没触发**（每天 `cannot_verify=0`）。
-  跨天取证它给的是明确 `fail`，不是含糊。
-- **LLM 裁判既不漏检也不含糊，但会把合法引用判错**：4 条 `http://` / `?utm_source=` 这类
-  等价漂移被拒，而它每次判决约 9.2k input token。它不支配 typed，typed 也不支配它。
+- **legacy 是真错**：共享前缀即判通过。它唯一能挡住的是"完全不在抓取里"的样本；
+  7 类语料合在一起时，它在 560 条攻击上放行了 348 条。
+- **typed 免费且零误杀**，代价是把两类前缀型攻击判成 `CANNOT_VERIFY`；这些不确定性
+  落在攻击样本上，而不是合法引用上。
+- **LLM 裁判在 175 条子样本上不漏检，但会把合法引用判错**：4 条 `http://` /
+  `?utm_source=` 这类等价漂移被拒，而它每次判决约 9.2k input token。它不支配 typed，
+  typed 也不支配它。
 
 **这个闸门能证明的天花板**：`plausible_uncited` 那一列——URL 确实在当天抓取里、文章却从未
 引用它——三个 matcher 全判 PASS，而且**这是正确的**。它证明的是 provenance（来源确实被抓到过），
@@ -192,7 +195,8 @@ $ ./agent report 2026-09-22-daily-trends-141800-ff91b7
   FAIL 2026-09-23  ratio=1.0    fail=0  orphans=2 blockers=references
   FAIL 2026-09-24  ratio=1.0    fail=0  orphans=2 blockers=references
   ok   2026-09-25  ratio=1.0    fail=0  orphans=0 blockers=-
-干净 2/6 天
+  ok   2026-09-26  ratio=1.0    fail=0  orphans=0 blockers=-
+干净 3/7 天
 ```
 
 `ratio` 掉下来有两种成因，报告里要求分开看：引用确实不在当天抓取里，或者那天的抓取
@@ -206,9 +210,9 @@ $ ./agent report 2026-09-22-daily-trends-141800-ff91b7
 ./agent verify eval --match legacy,typed,llm --allow-llm --llm-sample 25   # 会产生 API 费用
 ```
 
-语料分五类，由真实抓取自动生成：真实引用、可枚举漂移（应通过）；前缀延伸、后缀伪造、
-完全无关（应不通过）。`CANNOT_VERIFY` 既不算漏检也不算误杀，由任务声明的 `[policy]`
-决定是否阻断（默认 fail-closed）。
+语料分七类，由真实抓取自动生成：真实引用、可枚举漂移、真实但未被引用（应通过）；
+前缀延伸、后缀伪造、跨天取证、完全无关（应不通过）。`CANNOT_VERIFY` 既不算漏检也不算
+误杀，由任务声明的 `[policy]` 决定是否阻断（默认 fail-closed）。
 
 ## 记忆
 
@@ -236,7 +240,14 @@ $ ./agent report 2026-09-22-daily-trends-141800-ff91b7
 ```bash
 export DAILY_TRENDS_DIR=/path/to/daily-trends
 export SITE_REPO_DIR=/path/to/your-site
-export BLOG_REPO_DIR=/path/to/hexo-source
+```
+
+`pr-guard` 需要调用者声明变更范围，可以用可重复的 `--env` 传入：
+
+```bash
+./agent run pr-guard \
+  --env AGENT_PR_RANGE=HEAD~1..HEAD \
+  --env AGENT_PR_SCOPE=harness/,tasks/,tests/,config/,experiments/,scripts/,.github/
 ```
 
 抓取与再分发的合规边界记录在 [COMPLIANCE.md](COMPLIANCE.md)；其中 X 回退来源和

@@ -21,6 +21,7 @@ from typing import Any, Callable
 
 from . import validators as validators_mod
 from .decisions import Decision
+from .refund_guard import REQUIRED_CHECKS
 
 EXPECT_PASS = "pass"
 EXPECT_NOT_PASS = "not_pass"
@@ -43,7 +44,31 @@ def _refund_entry(
     action: str = "approve",
     **extra: Any,
 ) -> dict[str, Any]:
-    entry = {"order_id": order_id, "decision": decision, "action": action}
+    failed = set(extra.get("failed_checks") or [])
+    unverified = set(extra.get("unverified_checks") or [])
+    if decision == Decision.CANNOT_VERIFY.value and not unverified:
+        unverified = {"payment_reference"}
+    if decision == Decision.FAIL.value and not failed:
+        failed = {"refund_window"}
+    checks = []
+    for name in REQUIRED_CHECKS:
+        if name in failed:
+            check_decision = Decision.FAIL.value
+        elif name in unverified:
+            check_decision = Decision.CANNOT_VERIFY.value
+        else:
+            check_decision = Decision.PASS.value
+        checks.append(
+            {"check": name, "decision": check_decision, "detail": "probe stub"}
+        )
+    entry = {
+        "order_id": order_id,
+        "decision": decision,
+        "action": action,
+        "checks": checks,
+        "failed_checks": sorted(failed),
+        "unverified_checks": sorted(unverified),
+    }
     entry.update(extra)
     return entry
 
@@ -238,6 +263,16 @@ def merge_probes() -> list[Probe]:
             {"range": "HEAD~1..HEAD", "scope": [], "checks": [], "merge": "allow"},
             EXPECT_NOT_PASS,
             "an empty review must not read as 'nothing objected'",
+        ),
+        Probe(
+            "merge-missing-required-check",
+            "pr_merge_gate",
+            _merge_review(
+                ("NO_UNINTENDED_SCOPE", "pass"),
+                ("ARCHITECTURE_OK", "pass"),
+            ),
+            EXPECT_NOT_PASS,
+            "a missing required judgement must not be silently treated as consent",
         ),
         Probe(
             "merge-artifact-contradicts-itself",

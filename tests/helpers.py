@@ -30,7 +30,7 @@ model = "replay"
 [providers.deepseek]
 type = "openai_compat"
 base_url = "https://api.deepseek.com/v1"
-model = "deepseek-chat"
+model = "deepseek-flash"
 api_key_env = "DEEPSEEK_API_KEY"
 
 [providers.local]
@@ -41,7 +41,7 @@ api_key_env = "LOCAL_API_KEY"
 
 [executors.codex]
 command = "codex"
-sandbox = "workspace-only"
+sandbox = "workspace-write"
 ephemeral = true
 
 [executors.claude]

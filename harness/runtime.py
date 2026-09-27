@@ -174,6 +174,10 @@ class Runner:
         )
         self.ledger.insert_run(row)
         self.ledger.finish_run(row)
+        try:
+            self.ledger.backup()
+        except Exception as exc:  # noqa: BLE001 - backup must not mask the guard
+            self.log.warning("could not back up ledger: %s", exc)
         self.log.warning("blocked run %s: monthly API budget exceeded", run_id)
         return RunOutcome(
             run=row,
@@ -351,6 +355,10 @@ class Runner:
                         self.ledger.record_step(run_id, record, seq)
                         skipped_notes.append(f"step {step.id} skipped by --skip-steps")
                         continue
+                    if time.monotonic() > deadline:
+                        raise HarnessError(
+                            f"run exceeded {task.budget.get('run_timeout_sec', self.config.budget.run_timeout_sec)}s budget"
+                        )
                     if step.requires_publish and not publish_enabled:
                         record = {
                             "id": step.id,

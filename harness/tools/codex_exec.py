@@ -12,8 +12,9 @@ import subprocess
 from pathlib import Path
 
 from ..config import AgentConfig
-from ..errors import ToolError
+from ..errors import PermissionDenied, ToolError
 from ..registry import Tool, ToolContext, schema
+from .shell_tool import _clean_env
 
 
 def build(ctx: ToolContext, *, config: AgentConfig, sandboxed: bool = True) -> list[Tool]:
@@ -33,6 +34,15 @@ def build(ctx: ToolContext, *, config: AgentConfig, sandboxed: bool = True) -> l
         workdir_path = Path(workdir).expanduser()
         if not workdir_path.is_dir():
             raise ToolError(f"workdir does not exist: {workdir_path}")
+        if sandboxed and not ctx_.within_readable(workdir_path):
+            raise PermissionDenied(f"executor workdir outside declared paths: {workdir_path}")
+        requested_sandbox = sandbox or executor.sandbox or "workspace-write"
+        if requested_sandbox == "danger-full-access":
+            raise PermissionDenied(
+                "codex_exec refuses danger-full-access; use a narrower sandbox"
+            )
+        if requested_sandbox not in {"read-only", "workspace-write"}:
+            raise ToolError(f"unsupported codex sandbox: {requested_sandbox!r}")
 
         out_file = ctx_.run_dir / "codex-last-message.txt"
         argv = [
@@ -43,7 +53,7 @@ def build(ctx: ToolContext, *, config: AgentConfig, sandboxed: bool = True) -> l
             "-C",
             str(workdir_path),
             "-s",
-            sandbox or executor.sandbox or "workspace-write",
+            requested_sandbox,
             "--skip-git-repo-check",
             "--json",
             "-o",
@@ -70,6 +80,7 @@ def build(ctx: ToolContext, *, config: AgentConfig, sandboxed: bool = True) -> l
             proc = subprocess.run(
                 argv,
                 cwd=str(workdir_path),
+                env=_clean_env(),
                 capture_output=True,
                 text=True,
                 timeout=timeout,
@@ -103,7 +114,7 @@ def build(ctx: ToolContext, *, config: AgentConfig, sandboxed: bool = True) -> l
                 {
                     "prompt": {"type": "string"},
                     "workdir": {"type": "string"},
-                    "sandbox": {"type": "string", "enum": ["read-only", "workspace-write", "danger-full-access"]},
+                    "sandbox": {"type": "string", "enum": ["read-only", "workspace-write"]},
                     "model": {"type": "string"},
                     "ephemeral": {"type": "boolean"},
                     "timeout_sec": {"type": "integer"},

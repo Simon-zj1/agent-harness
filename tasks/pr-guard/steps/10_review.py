@@ -61,6 +61,8 @@ def check_tests(ctx, repo: Path) -> dict:
             "cwd": str(repo),
             "timeout_sec": 900,
             "allow_failure": True,
+            "writes": [str(ctx.run_dir)],
+            "env": {"PYTHONDONTWRITEBYTECODE": "1"},
         },
     )
     output = (result.get("stderr") or "") + (result.get("stdout") or "")
@@ -177,7 +179,8 @@ def check_scope(ctx, repo: Path, *, revision_range: str, scope: list[str]) -> di
         path
         for path in changed
         if not any(
-            path == root
+            root in (".", "./", "*")
+            or path == root
             or path.startswith(root.rstrip("/") + "/")
             or fnmatch.fnmatch(path, root)
             for root in scope

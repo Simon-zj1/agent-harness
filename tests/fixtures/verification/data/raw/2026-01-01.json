@@ -1,0 +1,8 @@
+{
+  "hn": [
+    {"title": "fixture one", "url": "https://example.com/alpha"}
+  ],
+  "github": [
+    {"name": "fixture/repo", "html_url": "https://github.com/fixture/repo"}
+  ]
+}

@@ -8,8 +8,9 @@ import subprocess
 from pathlib import Path
 
 from ..config import AgentConfig
-from ..errors import ToolError
+from ..errors import PermissionDenied, ToolError
 from ..registry import Tool, ToolContext, schema
+from .shell_tool import _clean_env
 
 
 def build(ctx: ToolContext, *, config: AgentConfig, sandboxed: bool = True) -> list[Tool]:
@@ -28,6 +29,13 @@ def build(ctx: ToolContext, *, config: AgentConfig, sandboxed: bool = True) -> l
         workdir_path = Path(workdir).expanduser()
         if not workdir_path.is_dir():
             raise ToolError(f"workdir does not exist: {workdir_path}")
+        if sandboxed and not ctx_.within_readable(workdir_path):
+            raise PermissionDenied(f"executor workdir outside declared paths: {workdir_path}")
+        requested_mode = permission_mode or executor.permission_mode or "acceptEdits"
+        if requested_mode not in {"default", "acceptEdits", "plan"}:
+            raise PermissionDenied(
+                f"claude_exec refuses permission mode {requested_mode!r}"
+            )
 
         argv = [
             # Keep the planned argv readable in dry-run without the binary.
@@ -37,7 +45,7 @@ def build(ctx: ToolContext, *, config: AgentConfig, sandboxed: bool = True) -> l
             "--output-format",
             "json",
             "--permission-mode",
-            permission_mode or executor.permission_mode or "acceptEdits",
+            requested_mode,
             "--add-dir",
             str(workdir_path),
         ]
@@ -58,6 +66,7 @@ def build(ctx: ToolContext, *, config: AgentConfig, sandboxed: bool = True) -> l
             proc = subprocess.run(
                 argv,
                 cwd=str(workdir_path),
+                env=_clean_env(),
                 capture_output=True,
                 text=True,
                 timeout=timeout,
@@ -95,7 +104,7 @@ def build(ctx: ToolContext, *, config: AgentConfig, sandboxed: bool = True) -> l
                     "prompt": {"type": "string"},
                     "workdir": {"type": "string"},
                     "model": {"type": "string"},
-                    "permission_mode": {"type": "string"},
+                    "permission_mode": {"type": "string", "enum": ["default", "acceptEdits", "plan"]},
                     "timeout_sec": {"type": "integer"},
                 },
                 ["prompt", "workdir"],

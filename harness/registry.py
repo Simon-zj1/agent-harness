@@ -1,8 +1,9 @@
 """Tool interface, permission model and call ledger.
 
-Every side effect a task performs goes through a registered tool, so the
-harness always knows who wrote what, under which permission, and whether it
-succeeded.
+External side effects performed through the registry are audited, so the harness
+knows who wrote what, under which permission, and whether it succeeded.  Step
+scripts that bypass the registry are trusted harness code and must keep their
+writes inside the run directory.
 """
 
 from __future__ import annotations

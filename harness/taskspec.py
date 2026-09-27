@@ -64,13 +64,14 @@ class TaskSpec:
     def vars(self, *, date: str, run_dir: Path | None = None) -> dict[str, str]:
         extra = {k: str(v) for k, v in self.paths_table.items()}
         extra["date"] = date
+        extra["task_dir"] = str(self.dir)
         if run_dir is not None:
             extra["run_dir"] = str(run_dir)
         return extra
 
     def path_for(self, template: str, *, date: str, run_dir: Path | None = None) -> Path:
         """Resolve a task-relative, `{date}`/`{run_dir}` templated path."""
-        rendered = render(template, date=date, run_dir=run_dir, extra=self.paths_table)
+        rendered = render(template, date=date, run_dir=run_dir, extra=self.vars(date=date, run_dir=run_dir))
         path = Path(rendered).expanduser()
         if not path.is_absolute():
             path = self.dir / path
@@ -202,10 +203,16 @@ def _step(entry: dict[str, Any]) -> StepSpec:
         command = command.split()
     if not isinstance(command, list) or not command:
         raise TaskError(f"step {entry.get('id')}: command must be a non-empty list")
+    when = str(entry.get("when", "always"))
+    if when not in {"always", "validation_passed", "published"}:
+        raise TaskError(
+            f"step {entry['id']}: unsupported when={when!r}; "
+            "expected always/validation_passed/published"
+        )
     return StepSpec(
         id=entry["id"],
         command=[str(part) for part in command],
-        when=entry.get("when", "always"),
+        when=when,
         skip_on_dry_run=bool(entry.get("skip_on_dry_run", False)),
         retries=entry.get("retries"),
         timeout_sec=entry.get("timeout_sec"),

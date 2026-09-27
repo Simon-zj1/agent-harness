@@ -30,6 +30,8 @@
 python3 -m unittest discover -t . -s tests -v
 ./agent doctor
 ./agent run daily-trends --date 2026-09-25 --compose replay --dry-run
+./agent run pr-guard --env AGENT_PR_RANGE=HEAD~1..HEAD --env AGENT_PR_SCOPE=.
+./agent run refund-guard
 ./agent verify eval
 ./agent verify probes
 ./agent verify content

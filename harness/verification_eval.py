@@ -14,6 +14,7 @@ the previous heuristic" is a measurement, not an opinion.
 from __future__ import annotations
 
 import datetime as dt
+import hashlib
 import json
 import os
 import re
@@ -21,10 +22,21 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Iterable
 
+from . import paths
 from .decisions import Decision, canonical_url, classify_url
 from .errors import HarnessError
 
-DEFAULT_DATA_DIR = "/Users/simon-zj/Documents/ChatGPT/daily-trends/data"
+
+def _default_data_dir() -> Path:
+    """The sibling daily-trends checkout used by this task.
+
+    The repository does not vendor that checkout, but it must not hard-code a
+    single author's absolute home path either.
+    """
+    return paths.repo_root().parent / "daily-trends" / "data"
+
+
+DEFAULT_DATA_DIR = str(_default_data_dir())
 
 # Kinds, and what a correct gate must say about them.
 KIND_LEGIT = "legit"
@@ -660,8 +672,18 @@ def compare_matchers(
         "generated_at": dt.datetime.now().astimezone().isoformat(timespec="seconds"),
         "days": corpus.get("days", []),
         "samples": len(corpus.get("samples", [])),
+        "corpus_fingerprint": corpus_fingerprint(corpus),
         "matchers": results,
     }
+
+
+def corpus_fingerprint(corpus: dict[str, Any]) -> str:
+    """Stable identity of the labelled corpus, not just its size."""
+    rows = [
+        f"{sample.get('sample_id')}|{sample.get('kind')}|{sample.get('day')}"
+        for sample in corpus.get("samples", [])
+    ]
+    return hashlib.sha256("\n".join(sorted(rows)).encode("utf-8")).hexdigest()[:16]
 
 
 def markdown(report: dict[str, Any]) -> str:
@@ -716,7 +738,7 @@ def markdown(report: dict[str, Any]) -> str:
         "",
         "## 口径",
         "",
-        "- 语料分五类：真实引用、可枚举漂移（应通过）；前缀延伸、后缀伪造、完全无关（应**不**通过）。",
+        "- 语料分七类：真实引用、可枚举漂移、真实但未被引用（应通过）；前缀延伸、后缀伪造、跨天取证、完全无关（应**不**通过）。",
         "- `漏检率` = 应拒绝的样本里被判为 PASS 的比例。这是有代价的方向：放行一条编造来源。",
         "- `误杀率` = 应通过的样本里被判为 FAIL 的比例。这是噪声方向：拦下真实内容。",
         "- `cannot_verify` 不计入漏检（它不是放行），但也**不是**通过——由任务策略决定是否阻断。",
@@ -731,7 +753,7 @@ def markdown(report: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
-BASELINE_VERSION = 1
+BASELINE_VERSION = 2
 
 # Both directions are failures, and both are worse when they go up. A leak lets
 # a fabricated source through; a false reject blocks a real one.
@@ -750,6 +772,7 @@ def baseline_from(report: dict[str, Any]) -> dict[str, Any]:
         "generated_at": dt.datetime.now().astimezone().isoformat(timespec="seconds"),
         "samples": report.get("samples"),
         "days": report.get("days"),
+        "corpus_fingerprint": report.get("corpus_fingerprint"),
         "matchers": {
             entry["matcher"]: {
                 metric: entry.get(metric) for metric in _REGRESSION_METRICS
@@ -768,6 +791,33 @@ def check_baseline(
     quietly gets worse while every test still passes.
     """
     regressions: list[dict[str, Any]] = []
+    baseline_fingerprint = baseline.get("corpus_fingerprint")
+    current_fingerprint = report.get("corpus_fingerprint")
+    if baseline_fingerprint and current_fingerprint and baseline_fingerprint != current_fingerprint:
+        return {
+            "ok": True,
+            "corpus_changed": True,
+            "regressions": [],
+            "compared_matchers": [],
+            "baseline_fingerprint": baseline_fingerprint,
+            "current_fingerprint": current_fingerprint,
+            "baseline_samples": baseline.get("samples"),
+            "current_samples": report.get("samples"),
+        }
+    if not baseline_fingerprint and (
+        baseline.get("samples") != report.get("samples")
+        or baseline.get("days") != report.get("days")
+    ):
+        return {
+            "ok": True,
+            "corpus_changed": True,
+            "regressions": [],
+            "compared_matchers": [],
+            "baseline_fingerprint": None,
+            "current_fingerprint": current_fingerprint,
+            "baseline_samples": baseline.get("samples"),
+            "current_samples": report.get("samples"),
+        }
     for entry in report.get("matchers", []):
         name = entry["matcher"]
         recorded = (baseline.get("matchers") or {}).get(name)
@@ -788,6 +838,7 @@ def check_baseline(
                 )
     return {
         "ok": not regressions,
+        "corpus_changed": False,
         "regressions": regressions,
         "compared_matchers": sorted(
             set(baseline.get("matchers") or {})

@@ -15,6 +15,8 @@ jobs:
         python-version: ["3.11", "3.13"]
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
 
       - uses: actions/setup-python@v5
         with:
@@ -29,3 +31,22 @@ jobs:
         # Fixture-driven and offline: hits the refund gate with payloads that
         # break its fail-closed invariant, and with payloads that must be allowed.
         run: ./agent verify probes
+
+      - name: Verification eval on checked-in fixtures
+        # Runs the URL matcher against a tiny two-day fixture corpus so the
+        # matcher code is exercised even when the author's daily-trends checkout
+        # is not present.
+        run: |
+          DAILY_TRENDS_DATA_DIR=tests/fixtures/verification/data \
+            ./agent verify eval --corpus /tmp/agent-harness-fixture-corpus.json
+
+      - name: PR guard smoke
+        # Exercises the task end-to-end, including the three required
+        # judgements. "." is a smoke scope; production callers should narrow it.
+        run: |
+          ./agent run pr-guard \
+            --env AGENT_PR_RANGE=HEAD~1..HEAD \
+            --env AGENT_PR_SCOPE=.
+
+      - name: Refund guard smoke
+        run: ./agent run refund-guard

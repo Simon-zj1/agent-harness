@@ -87,6 +87,13 @@ def build_parser() -> argparse.ArgumentParser:
         default="",
         help="comma-separated step ids to skip (debugging; marks the run degraded)",
     )
+    run.add_argument(
+        "--env",
+        action="append",
+        default=[],
+        metavar="KEY=VALUE",
+        help="extra environment variable for task steps (repeatable)",
+    )
     run.add_argument("--trigger", default="manual", help="manual | launchd | experiment")
     run.set_defaults(_handler=cmd_run)
 
@@ -235,6 +242,16 @@ def build_parser() -> argparse.ArgumentParser:
 # -- commands --------------------------------------------------------------
 def cmd_run(args: argparse.Namespace) -> int:
     runner = Runner()
+    extra_env: dict[str, str] = {}
+    for item in args.env:
+        if "=" not in item:
+            console().error(f"--env expects KEY=VALUE, got {item!r}")
+            return EXIT_USAGE
+        key, value = item.split("=", 1)
+        if not key or not key.replace("_", "").isalnum():
+            console().error(f"--env has an invalid variable name: {key!r}")
+            return EXIT_USAGE
+        extra_env[key] = value
     outcome = runner.run(
         RunOptions(
             task=args.task,
@@ -250,6 +267,7 @@ def cmd_run(args: argparse.Namespace) -> int:
             notify=args.notify,
             wait_lock=args.wait_lock,
             skip_steps=[s.strip() for s in args.skip_steps.split(",") if s.strip()],
+            extra_env=extra_env,
         )
     )
     log = console()
@@ -618,6 +636,19 @@ def cmd_doctor(args: argparse.Namespace) -> int:
 
             if spec.name not in validator_names():
                 problems.append(f"{name}: unknown validator {spec.name}")
+        for entry in task.readable_paths:
+            if "{run_dir}" in entry:
+                continue
+            try:
+                resolved = task.path_for(entry, date=default_date(task))
+            except Exception as exc:  # noqa: BLE001 - report, don't crash doctor
+                problems.append(f"{name}: cannot resolve readable path {entry!r}: {exc}")
+                continue
+            if not resolved.exists():
+                problems.append(
+                    f"{name}: readable path does not exist: {resolved} "
+                    f"(set the task's environment override or clone the dependency)"
+                )
 
     ledger = Ledger()
     log.info(f"ledger      : {ledger.path}")
@@ -796,7 +827,13 @@ def cmd_verify_eval(args: argparse.Namespace) -> int:
         verdict = verification_eval.check_baseline(
             report, verification_eval.load_baseline(baseline_path)
         )
-        if verdict["compared_matchers"]:
+        if verdict.get("corpus_changed"):
+            log.info(
+                "baseline skipped: corpus changed "
+                f"({verdict.get('baseline_samples')} -> {verdict.get('current_samples')} samples); "
+                "re-freeze with ./agent verify eval --update-baseline"
+            )
+        elif verdict["compared_matchers"]:
             if verdict["ok"]:
                 log.info(
                     "baseline: no regression vs "

@@ -609,6 +609,8 @@ def _delegate(ctx, *, raw_path: Path, content_path: Path, tools: Path) -> int:
         "tokens_in": result.get("tokens_in", 0),
         "tokens_out": result.get("tokens_out", 0),
     }
+    if result.get("cost_usd") is not None:
+        metrics["cost_usd"] = result["cost_usd"]
     if result.get("dry_run") or result.get("executed") is False:
         return stepctx.fail(
             ctx,

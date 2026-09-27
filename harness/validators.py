@@ -22,6 +22,7 @@ from .decisions import (
     classify_url,
     combine,
 )
+from . import refund_guard
 from .errors import ValidationFailed
 
 Validator = Callable[..., dict[str, Any]]
@@ -397,6 +398,7 @@ def daily_trends_verifiable(
 def refund_decisions_fail_closed(
     path: str | Path,
     *,
+    orders_path: str | Path | None = None,
     name: str = "refund_decisions_fail_closed",
 ) -> dict[str, Any]:
     """High-stakes variant: an unverifiable refund must never be approved.
@@ -424,16 +426,65 @@ def refund_decisions_fail_closed(
             failure_class=FailureClass.MALFORMED,
         )
 
-    valid_decisions = {member.value for member in Decision}
+    valid_decisions = {
+        Decision.PASS.value,
+        Decision.FAIL.value,
+        Decision.CANNOT_VERIFY.value,
+    }
     valid_actions = {"approve", "deny", "escalate"}
     violations: list[Evidence] = []
     tally: dict[str, int] = {}
+    expected_by_id: dict[str, dict[str, Any]] | None = None
+    if orders_path is not None:
+        try:
+            book = load_content(orders_path)
+        except ValidationFailed as exc:
+            return _result(name, False, str(exc), failure_class=FailureClass.MALFORMED)
+        ledger = set(book.get("payment_ledger") or [])
+        expected_by_id = {
+            str(order.get("order_id")): refund_guard.decide(
+                order, book.get("policy") or {}, ledger
+            )
+            for order in (book.get("orders") or [])
+        }
+    seen_order_ids: set[str] = set()
 
     for entry in results:
         order_id = str(entry.get("order_id", "?"))
         decision = str(entry.get("decision", ""))
         action = str(entry.get("action", ""))
         tally[decision] = tally.get(decision, 0) + 1
+        if expected_by_id is not None:
+            expected = expected_by_id.get(order_id)
+            if expected is None:
+                violations.append(
+                    Evidence(
+                        ref=order_id,
+                        detail="decision for an order that is not in the ground-truth file",
+                    )
+                )
+            else:
+                seen_order_ids.add(order_id)
+                if decision != expected["decision"]:
+                    violations.append(
+                        Evidence(
+                            ref=order_id,
+                            detail=(
+                                f"decision mismatch: artifact says {decision!r}, "
+                                f"ground truth says {expected['decision']!r}"
+                            ),
+                        )
+                    )
+                if action != expected["action"]:
+                    violations.append(
+                        Evidence(
+                            ref=order_id,
+                            detail=(
+                                f"action mismatch: artifact says {action!r}, "
+                                f"ground truth says {expected['action']!r}"
+                            ),
+                        )
+                    )
 
         if decision not in valid_decisions:
             violations.append(
@@ -445,6 +496,91 @@ def refund_decisions_fail_closed(
                 Evidence(ref=order_id, detail=f"unknown action {action!r}")
             )
             continue
+
+        checks = entry.get("checks")
+        if not isinstance(checks, list) or not checks:
+            violations.append(
+                Evidence(ref=order_id, detail="missing the four ground-truth checks")
+            )
+            continue
+        names: list[str] = []
+        check_decisions: dict[str, str] = {}
+        for check in checks:
+            if not isinstance(check, dict):
+                violations.append(
+                    Evidence(ref=order_id, detail="check entry is not an object")
+                )
+                continue
+            check_name = str(check.get("check", ""))
+            names.append(check_name)
+            if check_name not in refund_guard.REQUIRED_CHECKS:
+                violations.append(
+                    Evidence(ref=order_id, detail=f"unknown check {check_name!r}")
+                )
+                continue
+            check_decision = str(check.get("decision", ""))
+            if check_decision not in valid_decisions:
+                violations.append(
+                    Evidence(
+                        ref=order_id,
+                        detail=f"check {check_name!r} has unknown decision {check_decision!r}",
+                    )
+                )
+                continue
+            check_decisions[check_name] = check_decision
+        duplicate_checks = sorted({name for name in names if names.count(name) > 1})
+        if duplicate_checks:
+            violations.append(
+                Evidence(ref=order_id, detail=f"duplicate checks: {duplicate_checks}")
+            )
+        missing_checks = sorted(set(refund_guard.REQUIRED_CHECKS) - set(check_decisions))
+        if missing_checks:
+            violations.append(
+                Evidence(ref=order_id, detail=f"missing checks: {missing_checks}")
+            )
+            continue
+        computed_values = set(check_decisions.values())
+        if Decision.FAIL.value in computed_values:
+            computed_decision = Decision.FAIL.value
+        elif Decision.CANNOT_VERIFY.value in computed_values:
+            computed_decision = Decision.CANNOT_VERIFY.value
+        else:
+            computed_decision = Decision.PASS.value
+        if decision != computed_decision:
+            violations.append(
+                Evidence(
+                    ref=order_id,
+                    detail=(
+                        f"decision {decision!r} contradicts its checks "
+                        f"({computed_decision!r})"
+                    ),
+                )
+            )
+        computed_failed = sorted(
+            name for name, value in check_decisions.items() if value == Decision.FAIL.value
+        )
+        computed_unverified = sorted(
+            name
+            for name, value in check_decisions.items()
+            if value == Decision.CANNOT_VERIFY.value
+        )
+        if sorted(entry.get("failed_checks") or []) != computed_failed:
+            violations.append(
+                Evidence(
+                    ref=order_id,
+                    detail=f"failed_checks does not match checks: {entry.get('failed_checks')}",
+                )
+            )
+        if sorted(entry.get("unverified_checks") or []) != computed_unverified:
+            violations.append(
+                Evidence(
+                    ref=order_id,
+                    detail=(
+                        "unverified_checks does not match checks: "
+                        f"{entry.get('unverified_checks')}"
+                    ),
+                )
+            )
         if decision == Decision.PASS.value and action != "approve":
             violations.append(
                 Evidence(
@@ -466,6 +602,16 @@ def refund_decisions_fail_closed(
                     ref=order_id,
                     detail="fail-closed violated: unverifiable precondition was "
                     f"approved (unverified={entry.get('unverified_checks')})",
+                )
+            )
+
+    if expected_by_id is not None:
+        missing_orders = sorted(set(expected_by_id) - seen_order_ids)
+        if missing_orders:
+            violations.append(
+                Evidence(
+                    ref="decisions.json",
+                    detail=f"missing decisions for orders: {missing_orders}",
                 )
             )
 
@@ -498,6 +644,9 @@ def refund_decisions_fail_closed(
     )
 
 
+REQUIRED_MERGE_CHECKS = ("TESTS_PASS", "ARCHITECTURE_OK", "NO_UNINTENDED_SCOPE")
+
+
 @validator("pr_merge_gate")
 def pr_merge_gate(
     path: str | Path,
@@ -519,7 +668,7 @@ def pr_merge_gate(
         return _result(name, False, str(exc), failure_class=FailureClass.MALFORMED)
 
     checks = payload.get("checks") or []
-    if not checks:
+    if not isinstance(checks, list) or not checks:
         return _result(
             name,
             False,
@@ -530,10 +679,20 @@ def pr_merge_gate(
     valid = {member.value for member in Decision}
     blocking: list[Evidence] = []
     tally: dict[str, int] = {}
+    names: list[str] = []
     for entry in checks:
+        if not isinstance(entry, dict):
+            blocking.append(Evidence(ref="review.json", detail="check entry is not an object"))
+            continue
         label = str(entry.get("check", "?"))
+        names.append(label)
         decision = str(entry.get("decision", ""))
         tally[decision] = tally.get(decision, 0) + 1
+        if label not in REQUIRED_MERGE_CHECKS:
+            blocking.append(
+                Evidence(ref=label, detail=f"unknown check {label!r}; refusing to guess")
+            )
+            continue
         if decision not in valid:
             blocking.append(Evidence(ref=label, detail=f"unknown decision {decision!r}"))
             continue
@@ -556,8 +715,29 @@ def pr_merge_gate(
                 Evidence(ref=label, detail="abstained; treated as blocking")
             )
 
+    duplicates = sorted({label for label in names if names.count(label) > 1})
+    if duplicates:
+        blocking.append(
+            Evidence(ref="review.json", detail=f"duplicate checks: {duplicates}")
+        )
+    missing = [label for label in REQUIRED_MERGE_CHECKS if label not in names]
+    if missing:
+        blocking.append(
+            Evidence(
+                ref="review.json",
+                detail=f"missing required checks: {missing}",
+            )
+        )
+
     declared = payload.get("merge")
-    if declared == "allow" and blocking:
+    if declared != "allow":
+        blocking.append(
+            Evidence(
+                ref="review.json",
+                detail=f"the artifact does not claim allow (merge={declared!r})",
+            )
+        )
+    elif blocking:
         blocking.append(
             Evidence(
                 ref="review.json",

@@ -1,0 +1,16 @@
+{
+  "date": "2026-01-02",
+  "references": [
+    {"id": 1, "title": "fixture two", "url": "https://example.com/beta"}
+  ],
+  "sections": [
+    {
+      "id": "insights",
+      "items": [{"title": {"zh": "x", "en": "x"}, "sources": [1]}]
+    },
+    {
+      "id": "github",
+      "items": []
+    }
+  ]
+}

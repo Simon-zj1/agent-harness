@@ -104,6 +104,18 @@ class ToolPermissionTests(unittest.TestCase):
                 },
             )
 
+    def test_shell_rejects_argv_paths_outside_declared_writes(self) -> None:
+        outside = self.sandbox.root / "outside.txt"
+        with self.assertRaises(PermissionDenied):
+            self.registry.call(
+                "shell_run",
+                {
+                    "argv": ["rm", str(outside)],
+                    "cwd": str(self.writable),
+                    "writes": [str(self.writable)],
+                },
+            )
+
     def test_notify_tool_is_silent_in_dry_run(self) -> None:
         ctx = ToolContext(
             run_id="run-3",
@@ -186,6 +198,45 @@ class ToolPermissionTests(unittest.TestCase):
     def test_freeform_urls_are_rejected_by_http_tool(self) -> None:
         with self.assertRaises(ToolError):
             self.registry.call("http_get", {"url": "file:///etc/passwd"})
+
+    def test_fs_exists_is_confined_to_readable_paths(self) -> None:
+        with self.assertRaises(PermissionDenied):
+            self.registry.call("fs_exists", {"path": "/etc/hosts"})
+
+    def test_executor_workdir_is_confined_to_declared_paths(self) -> None:
+        ctx = ToolContext(
+            run_id="run-workdir",
+            run_dir=self.run_dir,
+            task_name="demo",
+            target_date="2026-09-25",
+            dry_run=True,
+            readable_paths=[self.writable],
+            writable_paths=[self.writable],
+            data={"task_dir": str(self.writable)},
+        )
+        registry = build_registry(ctx, config=self.config)
+        with self.assertRaises(PermissionDenied):
+            registry.call(
+                "codex_exec", {"prompt": "hello", "workdir": "/tmp"}
+            )
+        with self.assertRaises(ToolError):
+            registry.call(
+                "codex_exec",
+                {
+                    "prompt": "hello",
+                    "workdir": str(self.writable),
+                    "sandbox": "danger-full-access",
+                },
+            )
+        with self.assertRaises(ToolError):
+            registry.call(
+                "claude_exec",
+                {
+                    "prompt": "hello",
+                    "workdir": str(self.writable),
+                    "permission_mode": "bypassPermissions",
+                },
+            )
 
     def test_argument_validation_rejects_wrong_types(self) -> None:
         schema = {"type": "object", "properties": {"count": {"type": "integer"}}, "required": ["count"]}

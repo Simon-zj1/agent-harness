@@ -8,24 +8,25 @@
 
 ```bash
 # 免费冒烟测试：复用当天已有内容，只生成预览，不碰站点仓库
-./agent run daily-trends --date 2026-09-22 --compose replay --dry-run --skip-steps fetch
+./agent run daily-trends --date 2026-09-25 --compose replay --dry-run --skip-steps fetch
 
 # 用 DeepSeek 重新撰写（分片，会消耗 token），仍然只生成预览
-./agent run daily-trends --date 2026-09-22 --compose llm --dry-run
+./agent run daily-trends --date 2026-09-25 --compose llm --dry-run
 
 # 一次性整篇撰写（保留作为对照；实测会被输出上限截断，见下）
-./agent run daily-trends --date 2026-09-22 --compose llm-single --dry-run
+./agent run daily-trends --date 2026-09-25 --compose llm-single --dry-run
 
-# 完整发布：渲染进站点仓库并 push（无人值守时由 launchd 带 --publish 触发）
-./agent run daily-trends --publish
+# 发布默认禁用：task.toml 把 hexo deploy 定为唯一写入者。
+# 只有在明确接受“第二写入者”风险时才用 --publish。
+# ./agent run daily-trends --publish
 
 # 把整件事交给 Codex CLI（对照组，走实验台，仍然不发布）
-./agent experiment run daily-trends-compare --date 2026-09-22 --allow-llm --execute
+./agent experiment run daily-trends-compare --date 2026-09-25 --allow-llm --execute
 ```
 
 ## 为什么要分片撰写
 
-实测（2026-09-22 真实数据，deepseek-chat）：
+历史实测（2026-09-22 真实数据；当时使用 DeepSeek 旧模型 `deepseek-chat`）：
 
 | 路线 | 输入 tokens | 输出 tokens | 结果 |
 | --- | --- | --- | --- |
@@ -52,7 +53,9 @@
    （防编造闸门；低于阈值即失败）。
 4. `sitemap_sane` — 站点 sitemap 可解析、无重复 URL、不累积空行。
 
-任何必需校验失败 → 不发布、不写入正式内容存储，运行记为 failed 并通知。
+任何必需校验失败 → 不发布，运行记为 failed 并通知。
+（compose 阶段通过自身的结构/引用/可核验自检时会写入正式内容存储；
+ 如果后续 `sitemap_sane` 才失败，canonical 可能已经被 compose 更新。）
 （实测过：模型多写 4 条热点时被上限校验挡下，运行失败而不是把超限内容发出去。）
 
 ## 降级策略
