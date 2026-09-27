@@ -230,6 +230,8 @@ $ ./agent report 2026-09-22-daily-trends-141800-ff91b7
 密钥从环境变量读取，回退 `~/.codex/.env`；本仓库任何文件都不存明文密钥。
 `budget.monthly_limit_usd` 是月闸门，`budget.max_cost_per_run_usd` 是单次 compose
 的成本闸门；超过单次上限时不会写入正式内容存储，也不会继续渲染/发布。
+如果启用 webhook 通知，`notify.webhook_allow_hosts` 是目标主机白名单；非空时只允许
+列表内主机。
 
 每次真实运行结束都会生成 `runs/runs.db.backup`；需要把台账和记忆一起快照到指定目录：
 
