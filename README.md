@@ -199,11 +199,14 @@ $ ./agent report 2026-09-22-daily-trends-141800-ff91b7
   FAIL 2026-09-24  ratio=1.0    fail=0  orphans=2 blockers=references
   ok   2026-09-25  ratio=1.0    fail=0  orphans=0 blockers=-
   ok   2026-09-26  ratio=1.0    fail=0  orphans=0 blockers=-
-干净 3/7 天
+  FAIL 2026-09-27  ratio=1.0    fail=0  orphans=0 blockers=structure
+干净 3/8 天
 ```
 
 `ratio` 掉下来有两种成因，报告里要求分开看：引用确实不在当天抓取里，或者那天的抓取
 文件被后续运行覆盖过（`fetch` 曾在 dry-run 下也执行）。后者是可复现性事故，不是内容问题。
+2026-09-27 则是结构问题：canonical 文件里 20 条热点缺少双语 summary/comment，
+共 60 条结构错误；`verify content` 已把它标为 `blockers=structure`。
 
 这个命令**只诊断，不改已发布内容**——是否回修历史稿件是编辑决定。
 
