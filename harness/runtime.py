@@ -21,6 +21,7 @@ from .locks import FileLock
 from .logutil import logger as make_logger
 from .registry import ToolContext
 from .tools import build_registry
+from .tools.shell_tool import _clean_env
 
 
 @dataclass
@@ -91,6 +92,15 @@ class Runner:
                 )
                 self.log.info("superseded previous run %s", previous.run_id)
 
+        if (
+            not options.dry_run
+            and self.config.budget.monthly_limit_usd is not None
+            and self.ledger.monthly_cost() >= float(self.config.budget.monthly_limit_usd)
+        ):
+            return self._budget_blocked_outcome(
+                options, task, target_date, executor
+            )
+
         publish_enabled = (
             bool(options.publish)
             if options.publish is not None
@@ -114,6 +124,62 @@ class Runner:
         finally:
             for lock in reversed(acquired):
                 lock.release()
+
+    def _budget_blocked_outcome(
+        self,
+        options: RunOptions,
+        task: taskspec.TaskSpec,
+        target_date: str,
+        executor: str,
+    ) -> RunOutcome:
+        """Record a zero-work failed run instead of silently spending more."""
+        run_id = self._run_id(task.name, target_date)
+        run_dir = paths.runs_dir() / run_id
+        (run_dir / "steps").mkdir(parents=True, exist_ok=True)
+        started = now_iso()
+        limit = float(self.config.budget.monthly_limit_usd)
+        spent = self.ledger.monthly_cost()
+        row = RunRow(
+            run_id=run_id,
+            task=task.name,
+            target_date=target_date,
+            status="failed",
+            executor=executor,
+            dry_run=False,
+            trigger=options.trigger,
+            experiment=options.experiment,
+            arm=options.arm,
+            compose_mode=options.compose_mode or str(task.context.get("compose_default", "auto")),
+            context_strategy=options.context_strategy,
+            memory_enabled=options.memory_enabled,
+            started_at=started,
+            finished_at=started,
+            duration_ms=0,
+            inputs={
+                "date": target_date,
+                "executor": executor,
+                "compose_mode": options.compose_mode,
+                "context_strategy": options.context_strategy,
+                "memory": options.memory_enabled,
+                **options.tags,
+            },
+            outputs={"published": False},
+            metrics={"duration_ms": 0, "tool_calls": 0},
+            failure_class="budget_exceeded",
+            error=(
+                f"monthly API budget exceeded (limit=${limit:.2f}, "
+                f"known spend=${spent:.2f}); no steps ran"
+            ),
+            notes="blocked before execution by monthly API budget guard",
+        )
+        self.ledger.insert_run(row)
+        self.ledger.finish_run(row)
+        self.log.warning("blocked run %s: monthly API budget exceeded", run_id)
+        return RunOutcome(
+            run=row,
+            skipped=False,
+            message=row.error or "monthly API budget exceeded",
+        )
 
     # -- internals ----------------------------------------------------------
     def _execute(
@@ -351,6 +417,11 @@ class Runner:
         row.validators = validation_results
         row.outputs = {**{f"artifact_{i}": a for i, a in enumerate(artifacts)}, "published": published}
         row.published = published
+        notify_failure = None
+        if self._should_notify(options, row):
+            notify_failure = self._notify(row, task=task, tool_ctx=tool_ctx, log=log)
+        if notify_failure:
+            degradations.append(f"notification failed: {notify_failure}")
         row.tool_calls = self.ledger.tool_call_count(run_id)
         row.metrics = {**metrics, "duration_ms": row.duration_ms, "tool_calls": row.tool_calls}
         row.tokens_in = int(metrics.get("tokens_in", 0))
@@ -358,6 +429,10 @@ class Runner:
         row.cost_usd = metrics.get("cost_usd")
         row.notes = " | ".join(degradations) if degradations else None
         self.ledger.finish_run(row)
+        try:
+            self.ledger.backup()
+        except Exception as exc:  # noqa: BLE001 - backup must not fail the run
+            self.log.warning("could not back up ledger: %s", exc)
 
         log.info(
             "run %s finished status=%s published=%s duration=%sms",
@@ -368,8 +443,6 @@ class Runner:
         )
 
         self._write_memory(row, task=task, artifacts=artifacts, degradations=degradations)
-        if self._should_notify(options, row):
-            self._notify(row, task=task, tool_ctx=tool_ctx, log=log)
 
         return RunOutcome(run=row, skipped=False, message=f"{row.status} ({run_id})")
 
@@ -534,7 +607,7 @@ class Runner:
         step_id: str,
         run_dir: Path,
     ) -> dict[str, str]:
-        env = dict(os.environ)
+        env = _clean_env()
         env.update(
             {
                 "AGENT_CONTEXT": str(context_path),
@@ -553,6 +626,16 @@ class Runner:
                 "PYTHONPATH": _prepend_pythonpath(str(paths.repo_root())),
             }
         )
+        # Steps that call a provider need that provider's key, but they do not
+        # need every secret from the parent shell.  Only configured provider
+        # keys that are actually set are forwarded.
+        for provider in self.config.providers.values():
+            key = provider.api_key_env
+            if key and os.environ.get(key):
+                env[key] = os.environ[key]
+        # The fetch step may need the X credential; other steps do not.
+        if step_id == "fetch" and os.environ.get("X_BEARER_TOKEN"):
+            env["X_BEARER_TOKEN"] = os.environ["X_BEARER_TOKEN"]
         env.update(options.extra_env)
         return env
 
@@ -670,10 +753,17 @@ class Runner:
             return row.status in ("failed", "crashed")
         return False
 
-    def _notify(self, row: RunRow, *, task: taskspec.TaskSpec, tool_ctx: ToolContext, log: Any) -> None:
+    def _notify(
+        self,
+        row: RunRow,
+        *,
+        task: taskspec.TaskSpec,
+        tool_ctx: ToolContext,
+        log: Any,
+    ) -> str | None:
         if "notify" not in task.allowed_tool_names():
             log.warning("task %s does not allow the notify tool; skipping notification", task.name)
-            return
+            return f"task {task.name} does not allow notify"
         registry = build_registry(tool_ctx, config=self.config, ledger=self.ledger, logger=log)
         title = f"{task.name} · {row.status}"
         artifacts = [v for v in row.outputs.values() if isinstance(v, str)]
@@ -682,6 +772,8 @@ class Runner:
             registry.call("notify", {"title": title, "message": message[:400]})
         except Exception as exc:  # notification is best-effort
             log.warning("notification failed: %s", exc)
+            return str(exc)
+        return None
 
 
 def default_date(task: taskspec.TaskSpec, *, now: dt.datetime | None = None) -> str:

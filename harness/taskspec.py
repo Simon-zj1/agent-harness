@@ -148,6 +148,16 @@ def load(name_or_dir: str | Path, *, root: Path | None = None) -> TaskSpec:
         )
         for entry in raw.get("validators", [])
     ]
+    publish = raw.get("publish", {})
+    if (
+        any(step.requires_publish for step in steps)
+        and bool(publish.get("default_enabled", False))
+        and not str(publish.get("remote", "")).strip()
+    ):
+        raise TaskError(
+            f"task {name} enables publish but declares no publish.remote; "
+            "a publish step must not silently fall back to origin"
+        )
 
     return TaskSpec(
         name=name,
@@ -163,7 +173,7 @@ def load(name_or_dir: str | Path, *, root: Path | None = None) -> TaskSpec:
         outputs=raw.get("outputs", {}),
         context=raw.get("context", {}),
         budget=raw.get("budget", {}),
-        publish=raw.get("publish", {}),
+        publish=publish,
         policy=raw.get("policy", {}),
         trigger=raw.get("trigger", {}),
         paths_table=raw.get("paths", {}),

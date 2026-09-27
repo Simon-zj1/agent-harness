@@ -82,14 +82,17 @@ def _llm_chunked(ctx, *, raw_path: Path, content_path: Path) -> int:
     memory_block = stepctx.memory_block(ctx)
 
     tokens_in = tokens_out = 0
+    cost_usd = None
+    cost_usd = None
     notes: list[str] = []
 
-    overview, ti, to, problem = _call_chunk(
+    overview, ti, to, cost, problem = _call_chunk(
         ctx, provider, kind="overview", scope="全站总览", limit=0,
         evidence=evidence, memory=memory_block,
     )
     tokens_in += ti
     tokens_out += to
+    cost_usd = _merge_cost(cost_usd, cost)
     if overview is None:
         return stepctx.fail(
             ctx,
@@ -99,25 +102,27 @@ def _llm_chunked(ctx, *, raw_path: Path, content_path: Path) -> int:
 
     group_payloads: dict[str, dict] = {}
     for group_id, scope_zh, scope_en in INSIGHTS_GROUPS:
-        payload, ti, to, problem = _call_chunk(
+        payload, ti, to, cost, problem = _call_chunk(
             ctx, provider, kind="group", scope=f"{scope_zh} / {scope_en}",
             limit=GROUP_CHUNK_LIMIT,
             evidence=evidence, memory=memory_block,
         )
         tokens_in += ti
         tokens_out += to
+        cost_usd = _merge_cost(cost_usd, cost)
         if payload is None:
             notes.append(f"{group_id} 分段失败：{problem}")
             group_payloads[group_id] = {"items": [], "references": []}
         else:
             group_payloads[group_id] = payload
 
-    github_payload, ti, to, problem = _call_chunk(
+    github_payload, ti, to, cost, problem = _call_chunk(
         ctx, provider, kind="github", scope="GitHub 热门仓库", limit=GITHUB_CHUNK_LIMIT,
         evidence=evidence, memory=memory_block,
     )
     tokens_in += ti
     tokens_out += to
+    cost_usd = _merge_cost(cost_usd, cost)
     if github_payload is None:
         notes.append(f"github 分段失败：{problem}")
         github_payload = {"items": [], "references": []}
@@ -144,6 +149,8 @@ def _llm_chunked(ctx, *, raw_path: Path, content_path: Path) -> int:
         "tokens_in": tokens_in,
         "tokens_out": tokens_out,
     }
+    if cost_usd is not None:
+        metrics["cost_usd"] = cost_usd
     metrics.update(_metrics(content_path, raw_path))
     if not failures:
         _accept_content(ctx, content)
@@ -180,8 +187,13 @@ def _call_chunk(
     limit: int,
     evidence: str,
     memory: str,
-) -> tuple[dict | None, int, int, str]:
-    """One bounded model call. Returns (payload, tokens_in, tokens_out, problem)."""
+) -> tuple[dict | None, int, int, float | None, str]:
+    """One bounded model call.
+
+    Returns (payload, tokens_in, tokens_out, cost_usd, problem).  ``cost_usd``
+    is ``None`` when provider unit prices are not configured, so the ledger can
+    distinguish "free" from "cost unknown".
+    """
     system = (ctx.task_dir / str(ctx.task_raw.get("context", {}).get("prompt_dir", "prompts")) / "system.md").read_text(encoding="utf-8")
     template = (ctx.task_dir / str(ctx.task_raw.get("context", {}).get("prompt_dir", "prompts")) / "chunk.md").read_text(encoding="utf-8")
     base_prompt = (
@@ -194,6 +206,7 @@ def _call_chunk(
     )
 
     tokens_in = tokens_out = 0
+    cost_usd = None
     problem = "未调用"
     prompt = base_prompt
     for attempt in range(2):
@@ -207,12 +220,14 @@ def _call_chunk(
             )
         except Exception as exc:  # noqa: BLE001 - a chunk failure must not kill the run
             problem = f"{type(exc).__name__}: {exc}"
-            return None, tokens_in, tokens_out, problem
+            return None, tokens_in, tokens_out, cost_usd, problem
         tokens_in += response.tokens_in
         tokens_out += response.tokens_out
+        cost_usd = _merge_cost(cost_usd, response.cost_usd)
+        cost_usd = _merge_cost(cost_usd, response.cost_usd)
         payload = _parse_json(response.text)
         if payload is not None and response.finish_reason != "length":
-            return payload, tokens_in, tokens_out, ""
+            return payload, tokens_in, tokens_out, cost_usd, ""
         if response.finish_reason == "length":
             problem = f"输出被截断（达到 {CHUNK_MAX_TOKENS} token 上限）"
         else:
@@ -223,7 +238,7 @@ def _call_chunk(
                 + f"\n\n上一次失败：{problem}。请更精简：缩短 summary/comment，减少条目数，"
                 "但仍必须是完整可解析的单个 JSON 对象。"
             )
-    return None, tokens_in, tokens_out, problem
+    return None, tokens_in, tokens_out, cost_usd, problem
 
 
 def _merge_chunks(
@@ -436,6 +451,13 @@ def _pair(value) -> dict:
     return {"zh": "", "en": ""}
 
 
+def _merge_cost(total: float | None, value: float | None) -> float | None:
+    """Accumulate known costs while preserving the unknown-cost signal."""
+    if value is None:
+        return total
+    return round((total or 0.0) + float(value), 6)
+
+
 def _now_local() -> str:
     import datetime as dt
 
@@ -538,6 +560,8 @@ def _llm(ctx, *, raw_path: Path, content_path: Path, tools: Path) -> int:
         "tokens_in": tokens_in,
         "tokens_out": tokens_out,
     }
+    if cost_usd is not None:
+        metrics["cost_usd"] = cost_usd
     metrics.update(_metrics(content_path, raw_path))
     _accept_content(ctx, content)
     if failures:
@@ -623,8 +647,13 @@ def _accept_content(ctx, content: dict) -> None:
     if not ctx.tool_ctx.data.get("accept_content", True):
         return
     canonical = ctx.path("{tools_dir}") / "data" / f"{ctx.target_date}.json"
-    canonical.parent.mkdir(parents=True, exist_ok=True)
-    canonical.write_text(json.dumps(content, ensure_ascii=False, indent=2), encoding="utf-8")
+    ctx.registry.call(
+        "fs_write",
+        {
+            "path": str(canonical),
+            "content": json.dumps(content, ensure_ascii=False, indent=2),
+        },
+    )
 
 
 def _check(ctx, content: dict, *, raw_path: Path, content_path: Path) -> list[str]:

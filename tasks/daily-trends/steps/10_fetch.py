@@ -39,6 +39,7 @@ def main() -> int:
             "cwd": str(tools),
             "timeout_sec": 1400,
             "allow_failure": True,
+            "writes": [str(raw_path.parent)],
         },
     )
 

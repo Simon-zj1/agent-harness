@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import unittest
 from pathlib import Path
 
@@ -10,6 +11,7 @@ from harness.errors import PermissionDenied, ToolError
 from harness.ledger import Ledger
 from harness.registry import ToolContext, _validate_args
 from harness.tools import build_registry
+from harness.tools import shell_tool
 
 from .helpers import Sandbox
 
@@ -78,9 +80,29 @@ class ToolPermissionTests(unittest.TestCase):
             data={"task_dir": str(self.writable)},
         )
         registry = build_registry(ctx, config=self.config, ledger=self.ledger)
-        result = registry.call("shell_run", {"argv": ["git", "status"]})
+        result = registry.call(
+            "shell_run",
+            {"argv": ["git", "add", "."], "cwd": str(self.writable), "writes": [str(self.writable)]},
+        )
         self.assertFalse(result["executed"])
         self.assertTrue(result["dry_run"])
+
+    def test_shell_write_requires_declared_paths(self) -> None:
+        with self.assertRaises(PermissionDenied):
+            self.registry.call(
+                "shell_run",
+                {"argv": ["python3", "-c", "pass"], "cwd": str(self.writable)},
+            )
+
+        with self.assertRaises(PermissionDenied):
+            self.registry.call(
+                "shell_run",
+                {
+                    "argv": ["python3", "-c", "pass"],
+                    "cwd": str(self.writable),
+                    "writes": ["/tmp/outside-declared-write"],
+                },
+            )
 
     def test_notify_tool_is_silent_in_dry_run(self) -> None:
         ctx = ToolContext(
@@ -171,6 +193,21 @@ class ToolPermissionTests(unittest.TestCase):
             _validate_args("demo", schema, {"count": "many"})
         with self.assertRaises(ToolError):
             _validate_args("demo", schema, {})
+
+
+class ShellEnvironmentTests(unittest.TestCase):
+    def test_secret_environment_is_not_forwarded_to_shell(self) -> None:
+        old = os.environ.get("DEEPSEEK_API_KEY")
+        os.environ["DEEPSEEK_API_KEY"] = "super-secret"
+        try:
+            cleaned = shell_tool._clean_env()
+        finally:
+            if old is None:
+                os.environ.pop("DEEPSEEK_API_KEY", None)
+            else:
+                os.environ["DEEPSEEK_API_KEY"] = old
+        self.assertNotIn("DEEPSEEK_API_KEY", cleaned)
+        self.assertIn("PATH", cleaned)
 
 
 class NotificationTests(unittest.TestCase):

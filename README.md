@@ -11,7 +11,7 @@
 ## 一分钟上手
 
 ```bash
-cd /Users/simon-zj/Documents/ChatGPT/Agent
+cd /path/to/agent-harness
 ./agent doctor                                                     # 环境自检
 ./agent tasks                                                      # 已声明的任务
 ./agent run daily-trends --date 2026-09-22 --compose replay --dry-run   # 免费冒烟
@@ -34,7 +34,7 @@ harness/                  内核
   validators.py           验收标准（结构 / 引用 / 防编造可核验率）
   verification_eval.py    测量验收闸门自身：标注语料 + 多 matcher 对照 + 漏检率/误杀率
   providers/              模型适配层（DeepSeek 默认；本地 OpenAI 兼容端点预留）
-  loop.py                 自研 agent loop（工具调用 + 预算 + 停止条件）
+  loop.py                 实验性自研 agent loop（工具调用 + 预算 + 停止条件；不用于 daily-trends 主路径）
   experiment.py           多策略对比实验台
   launchd.py              从 task.toml 生成无人值守触发器
 tasks/daily-trends/       首个真实负载：把现有 RUNBOOK 流程搬进 harness
@@ -47,6 +47,9 @@ memory/ runs/             记忆与运行产物（AGENT_HOME 可整体迁移）
 `llm-single`（整篇一次写完，保留作对照——实测会被输出上限截断）、
 `delegate`（整件事交给 Codex/Claude）。
 
+`loop.py` 里的自研 loop 有独立测试，但当前 `daily-trends` 的 `llm` 路径走的是
+`providers` 直接调用的分片 map-reduce，而不是它；两者不互相替代，也不混称生产主循环。
+
 ## 与「直接用 Codex 读本地文件」的区别
 
 | 维度 | 在 Codex 里读本地文件 | 本 harness |
@@ -55,7 +58,7 @@ memory/ runs/             记忆与运行产物（AGENT_HOME 可整体迁移）
 | 触发 | 你打开它才会跑 | launchd 定时/事件触发，无人值守 |
 | 权限 | 围绕工作目录 | 每个任务声明可写路径 + 命令白名单，工具调用全部入台账 |
 | 验收 | 靠你读输出 | 校验器代码化，可核验率不达标就不发布 |
-| 模型 | 绑定某个 harness | provider 可换（DeepSeek/本地/其它），loop 是自己的 |
+| 模型 | 绑定某个 harness | provider 可换（DeepSeek/本地/其它）；自研 loop 目前是实验模块 |
 
 如果需求只是「问答 + 读本地文件」，用 Codex 更划算；本 harness 值得存在的前提是
 **无人值守 + 跨月累积的记忆 + 固定工件与验收标准**。
@@ -222,10 +225,19 @@ $ ./agent report 2026-09-22-daily-trends-141800-ff91b7
 `config/agent.toml`：默认 provider/executor、预算、通知、命令白名单、执行器参数。
 密钥从环境变量读取，回退 `~/.codex/.env`；本仓库任何文件都不存明文密钥。
 
-任务里的本机路径写成 `${VAR:-默认值}`，换机器不用改文件：
+每次真实运行结束都会生成 `runs/runs.db.backup`；需要把台账和记忆一起快照到指定目录：
+
+```bash
+./agent backup --out /path/to/backup-dir
+```
+
+任务里的本机路径默认指向仓库同级目录，或写成 `${VAR:-默认值}`，换机器不用改文件：
 
 ```bash
 export DAILY_TRENDS_DIR=/path/to/daily-trends
 export SITE_REPO_DIR=/path/to/your-site
 export BLOG_REPO_DIR=/path/to/hexo-source
 ```
+
+抓取与再分发的合规边界记录在 [COMPLIANCE.md](COMPLIANCE.md)；其中 X 回退来源和
+第三方站点条款标为“需外部确认”，不是已完成的法律结论。

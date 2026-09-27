@@ -53,6 +53,7 @@ class BudgetConfig:
     step_timeout_sec: int = 1800
     step_retries: int = 1
     max_tokens: int | None = None
+    monthly_limit_usd: float | None = None
 
 
 @dataclass

@@ -15,14 +15,16 @@ allowed_tools = [
 ]
 
 readable_paths = ["{tools_dir}", "{site_repo}", "{blog_repo}"]
-writable_paths = ["{tools_dir}/data", "{site_repo}", "{blog_repo}/source/tech"]
+writable_paths = ["{tools_dir}/data", "{site_repo}"]
 
 [paths]
-# Author-local defaults; every path can be overridden without editing this file:
+# Repository-local sibling defaults (relative to tasks/daily-trends), so a fresh
+# checkout does not hard-code any one author's absolute home path. Override for
+# a different layout without editing this file:
 #   export DAILY_TRENDS_DIR=... SITE_REPO_DIR=... BLOG_REPO_DIR=...
-tools_dir = "${DAILY_TRENDS_DIR:-/Users/simon-zj/Documents/ChatGPT/daily-trends}"
-site_repo = "${SITE_REPO_DIR:-/Users/simon-zj/Documents/ChatGPT/个人网站}"
-blog_repo = "${BLOG_REPO_DIR:-/Users/simon-zj/blog}"
+tools_dir = "${DAILY_TRENDS_DIR:-../../../daily-trends}"
+site_repo = "${SITE_REPO_DIR:-../../../个人网站}"
+blog_repo = "${BLOG_REPO_DIR:-../../../blog}"
 
 [context]
 # What `--compose` defaults to for unattended runs.
@@ -48,6 +50,12 @@ repair_rounds = 1
 # The hexo path is authoritative. To publish a day, run blog/tools/deploy.sh.
 default_enabled = false
 disabled_reason = "redundant with hexo deploy; keeping one writer on the Pages branch"
+# 用 SSH 别名而不是 origin：本机网络策略会挡 github.com:443（api 与 SSH 正常），
+# 这也是 daily-trends RUNBOOK 里使用的地址。
+remote = "git@github-simonzj1:Simon-zj1/Simon-zj1.github.io.git"
+branch = "main"
+commit_message = "Daily trends: {date}"
+add = ["trends", "css/trends.css", "tech/index.html", "sitemap.xml"]
 
 [policy]
 # Fail-closed. A reference that cannot be traced back to today's raw capture
@@ -57,12 +65,6 @@ disabled_reason = "redundant with hexo deploy; keeping one writer on the Pages b
 on_fail = "block"
 on_cannot_verify = "block"
 on_abstain = "block"
-# 用 SSH 别名而不是 origin：本机网络策略会挡 github.com:443（api 与 SSH 正常），
-# 这也是 daily-trends RUNBOOK 里使用的地址。
-remote = "git@github-simonzj1:Simon-zj1/Simon-zj1.github.io.git"
-branch = "main"
-commit_message = "Daily trends: {date}"
-add = ["trends", "css/trends.css", "tech/index.html", "sitemap.xml"]
 
 [trigger]
 type = "launchd"

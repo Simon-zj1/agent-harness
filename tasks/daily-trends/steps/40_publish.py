@@ -28,6 +28,7 @@ def main() -> int:
             "argv": ["git", "-C", str(site), "add", "--", *add_paths],
             "cwd": str(site),
             "timeout_sec": 300,
+            "writes": [str(site)],
         },
     )
     status = ctx.registry.call(
@@ -36,6 +37,7 @@ def main() -> int:
             "argv": ["git", "-C", str(site), "status", "--porcelain", "--", *add_paths],
             "cwd": str(site),
             "timeout_sec": 120,
+            "writes": [str(site)],
         },
     )
     if not (status.get("stdout") or "").strip():
@@ -49,6 +51,7 @@ def main() -> int:
             "argv": ["git", "-C", str(site), "commit", "-m", message],
             "cwd": str(site),
             "timeout_sec": 300,
+            "writes": [str(site)],
         },
     )
     push = ctx.registry.call(
@@ -58,6 +61,7 @@ def main() -> int:
             "cwd": str(site),
             "timeout_sec": 600,
             "allow_failure": True,
+            "writes": [str(site)],
         },
     )
     if push["returncode"] != 0:
@@ -72,6 +76,7 @@ def main() -> int:
             "argv": ["git", "-C", str(site), "rev-parse", "--short", "HEAD"],
             "cwd": str(site),
             "timeout_sec": 60,
+            "writes": [str(site)],
         },
     )
     return stepctx.finish(

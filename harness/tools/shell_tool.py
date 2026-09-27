@@ -1,4 +1,10 @@
-"""Shell tool: argv-only, allowlisted, audited."""
+"""Shell tool: argv-only, allowlisted, audited.
+
+Shell commands are the widest primitive in the task vocabulary, so they are
+also the narrowest when it comes to write permission.  A command that *can*
+write must declare the paths it is allowed to write before it runs; read-only
+commands such as ``git status`` stay read-only.
+"""
 
 from __future__ import annotations
 
@@ -22,6 +28,7 @@ def build(ctx: ToolContext, *, config: AgentConfig, sandboxed: bool = True) -> l
         cwd: str | None = None,
         timeout_sec: int | None = None,
         allow_failure: bool = False,
+        writes: list[str] | None = None,
     ) -> dict:
         if not isinstance(argv, list) or not argv or not all(isinstance(a, str) for a in argv):
             raise ToolError("shell_run expects argv as a list of strings")
@@ -35,10 +42,23 @@ def build(ctx: ToolContext, *, config: AgentConfig, sandboxed: bool = True) -> l
             raise PermissionDenied(f"cwd outside declared paths: {workdir}")
 
         timeout = timeout_sec or int(config.runtime.get("step_timeout_sec", 1800))
-        if ctx_.dry_run and program in config.runtime.get("mutating_commands", ["git", "rm", "rsync"]):
+        may_write = _command_may_write(program, argv, config.runtime.get("mutating_commands", []))
+        if sandboxed and may_write:
+            if not writes:
+                raise PermissionDenied(
+                    f"command {program!r} may write but shell_run declares no writes; "
+                    "add explicit writes=[...]"
+                )
+            for raw in writes:
+                target = _resolve_write_target(raw, workdir)
+                if not ctx_.within_writable(target):
+                    raise PermissionDenied(f"write outside declared paths: {target}")
+
+        if ctx_.dry_run and may_write:
             return {
                 "argv": argv,
                 "cwd": str(workdir),
+                "writes": [str(_resolve_write_target(raw, workdir)) for raw in (writes or [])],
                 "dry_run": True,
                 "executed": False,
                 "returncode": 0,
@@ -81,11 +101,12 @@ def build(ctx: ToolContext, *, config: AgentConfig, sandboxed: bool = True) -> l
             ),
             input_schema=schema(
                 {
-                    "argv": {"type": "array", "items": {"type": "string"}},
-                    "cwd": {"type": "string"},
-                    "timeout_sec": {"type": "integer"},
-                    "allow_failure": {"type": "boolean"},
-                },
+                "argv": {"type": "array", "items": {"type": "string"}},
+                "cwd": {"type": "string"},
+                "timeout_sec": {"type": "integer"},
+                "allow_failure": {"type": "boolean"},
+                "writes": {"type": "array", "items": {"type": "string"}},
+            },
                 ["argv"],
             ),
             handler=shell_run,
@@ -96,7 +117,13 @@ def build(ctx: ToolContext, *, config: AgentConfig, sandboxed: bool = True) -> l
 
 
 def _clean_env() -> dict[str, str]:
-    """Keep secrets out of child processes unless they are explicitly needed."""
+    """Keep secrets out of child processes.
+
+    Provider credentials are read by the provider layer, not inherited by
+    arbitrary shell commands.  If a command genuinely needs a credential, the
+    caller must pass it as an explicit argv/env argument and accept that it is
+    a narrower contract than the parent process's environment.
+    """
     keep = {
         "PATH",
         "HOME",
@@ -105,9 +132,6 @@ def _clean_env() -> dict[str, str]:
         "TMPDIR",
         "SHELL",
         "USER",
-        "DEEPSEEK_API_KEY",
-        "ANTHROPIC_API_KEY",
-        "X_API_BEARER_TOKEN",
         "HTTPS_PROXY",
         "HTTP_PROXY",
         "ALL_PROXY",
@@ -129,3 +153,83 @@ def _clean_env() -> dict[str, str]:
         "AGENT_MEMORY",
     }
     return {k: v for k, v in os.environ.items() if k in keep}
+
+
+_READ_ONLY_GIT = {
+    "status",
+    "log",
+    "show",
+    "rev-parse",
+    "diff",
+    "grep",
+    "ls-files",
+}
+
+
+def _resolve_write_target(raw: str, workdir: Path) -> Path:
+    target = Path(raw).expanduser()
+    return target if target.is_absolute() else (workdir / target)
+
+
+def _command_may_write(
+    program: str,
+    argv: list[str],
+    mutating_commands: list[str] | set[str],
+) -> bool:
+    """Return whether an argv-only command can mutate the filesystem.
+
+    This is deliberately conservative for interpreters: ``python3`` is treated
+    as a writer because a script can write anywhere.  For ``git`` and ``curl``
+    the answer depends on the subcommand/flags so ``git status`` and plain GET
+    requests do not need write declarations.
+    """
+    if program == "git":
+        subcommand = _git_subcommand(argv)
+        return subcommand not in _READ_ONLY_GIT
+    if program == "curl":
+        return _curl_may_write(argv)
+    if program in {"python3", "python", "codex", "claude"}:
+        return True
+    if program in {"osascript", "launchctl", "plutil", "rm", "cp", "mkdir", "touch", "mv", "rsync"}:
+        return True
+    if program == "sed" and any(arg == "-i" or (arg.startswith("-i") and arg != "-i") for arg in argv):
+        return True
+    return program in mutating_commands
+
+
+def _git_subcommand(argv: list[str]) -> str:
+    """Find the first git subcommand after global options."""
+    skip_value = {"-C", "-c", "--git-dir", "--work-tree"}
+    i = 1
+    while i < len(argv):
+        arg = argv[i]
+        if arg in skip_value:
+            i += 2
+            continue
+        if arg.startswith("-"):
+            i += 1
+            continue
+        return arg
+    return ""
+
+
+def _curl_may_write(argv: list[str]) -> bool:
+    """Classify curl by its request method/output flags."""
+    output_flags = {"-o", "--output", "-O", "--remote-name", "-T", "--upload-file"}
+    data_flags = {
+        "-d",
+        "--data",
+        "--data-raw",
+        "--data-binary",
+        "--data-urlencode",
+        "-F",
+        "--form",
+    }
+    method = "GET"
+    for index, arg in enumerate(argv):
+        if arg in output_flags or arg in data_flags:
+            return True
+        if arg in {"-X", "--request"}:
+            if index + 1 < len(argv):
+                method = argv[index + 1].upper()
+    return method not in {"GET", "HEAD"}

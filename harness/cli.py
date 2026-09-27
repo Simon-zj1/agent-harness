@@ -110,6 +110,12 @@ def build_parser() -> argparse.ArgumentParser:
     annotate.add_argument("--notes")
     annotate.set_defaults(_handler=cmd_annotate)
 
+    backup = sub.add_parser(
+        "backup", help="snapshot the ledger and memory directory locally"
+    )
+    backup.add_argument("--out", help="destination directory (default: runs/backups/<timestamp>)")
+    backup.set_defaults(_handler=cmd_backup)
+
     tasks = sub.add_parser("tasks", help="list declared tasks")
     tasks.set_defaults(_handler=cmd_tasks)
 
@@ -391,6 +397,43 @@ def cmd_annotate(args: argparse.Namespace) -> int:
     return EXIT_OK
 
 
+def cmd_backup(args: argparse.Namespace) -> int:
+    paths.ensure_layout()
+    out = (
+        Path(args.out).expanduser()
+        if args.out
+        else paths.runs_dir() / "backups" / dt.datetime.now().strftime("%Y%m%d-%H%M%S")
+    )
+    if out.exists() and any(out.iterdir()):
+        console().error(f"backup destination is not empty: {out}")
+        return EXIT_FAIL
+    out.mkdir(parents=True, exist_ok=True)
+
+    ledger = Ledger()
+    try:
+        ledger.backup(out / "runs.db")
+    finally:
+        ledger.close()
+
+    if paths.memory_dir().is_dir():
+        shutil.copytree(paths.memory_dir(), out / "memory", dirs_exist_ok=True)
+    if paths.runs_dir().is_dir():
+        shutil.copytree(
+            paths.runs_dir(),
+            out / "runs",
+            dirs_exist_ok=True,
+            ignore=shutil.ignore_patterns(
+                "backups",
+                "*.db",
+                "*.db-wal",
+                "*.db-shm",
+                "*.db.backup",
+            ),
+        )
+    console().info(f"backup written: {out}")
+    return EXIT_OK
+
+
 def cmd_tasks(args: argparse.Namespace) -> int:
     log = console()
     names = taskspec.available()
@@ -578,6 +621,25 @@ def cmd_doctor(args: argparse.Namespace) -> int:
 
     ledger = Ledger()
     log.info(f"ledger      : {ledger.path}")
+    integrity_findings = ledger.integrity_check()
+    if integrity_findings:
+        problems.append("ledger integrity: " + "; ".join(integrity_findings))
+    else:
+        log.info("ledger check: ok")
+    spent = ledger.monthly_cost()
+    limit = config.budget.monthly_limit_usd
+    if limit is not None:
+        log.info(
+            f"monthly api : ${spent:.4f} / ${limit:.2f} "
+            f"({'over budget' if spent >= float(limit) else 'ok'})"
+        )
+    else:
+        log.info(f"monthly api : ${spent:.4f} (no limit configured)")
+    try:
+        backup_path = ledger.backup()
+        log.info(f"ledger bkup : {backup_path}")
+    except Exception as exc:  # noqa: BLE001 - doctor should report, not crash
+        problems.append(f"ledger backup failed: {exc}")
     log.info(f"now         : {dt.datetime.now().astimezone().isoformat(timespec='seconds')}")
 
     if problems:

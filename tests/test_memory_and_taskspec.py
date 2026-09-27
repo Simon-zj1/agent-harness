@@ -4,6 +4,7 @@ import unittest
 from pathlib import Path
 
 from harness import memory, taskspec
+from harness.errors import TaskError
 
 from .helpers import Sandbox, demo_task_body
 
@@ -63,6 +64,17 @@ class TaskSpecTests(unittest.TestCase):
         self.sandbox.write_task("empty", 'name = "empty"\n')
         with self.assertRaises(Exception):
             taskspec.load("empty")
+
+    def test_enabled_publish_step_requires_a_remote(self) -> None:
+        body = (
+            demo_task_body(self.work)
+            .replace("[publish]\ndefault_enabled = false", "[publish]\ndefault_enabled = true")
+            + '\n[[steps]]\nid = "publish"\ncommand = ["python3", "steps/publish.py"]\n'
+            "when = \"validation_passed\"\nrequires_publish = true\n"
+        )
+        self.sandbox.write_task("publish-no-remote", body)
+        with self.assertRaises(TaskError):
+            taskspec.load("publish-no-remote")
 
 
 class MemoryTests(unittest.TestCase):

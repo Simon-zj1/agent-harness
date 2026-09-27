@@ -37,7 +37,7 @@ def build(ctx: ToolContext, *, config: AgentConfig, sandboxed: bool = True) -> l
         target = _resolve(ctx_, path)
         if sandboxed and not ctx_.within_writable(target):
             raise PermissionDenied(f"write outside declared paths: {target}")
-        if ctx_.dry_run and ctx_.data.get("fs_write_dry_run_blocks"):
+        if ctx_.dry_run:
             return {"path": str(target), "dry_run": True, "written": False}
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text(content, encoding="utf-8")

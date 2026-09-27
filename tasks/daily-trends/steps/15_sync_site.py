@@ -23,6 +23,7 @@ def main() -> int:
             "cwd": str(site),
             "timeout_sec": 300,
             "allow_failure": True,
+            "writes": [str(site)],
         },
     )
     if fetch["returncode"] != 0:
@@ -39,6 +40,7 @@ def main() -> int:
             "cwd": str(site),
             "timeout_sec": 300,
             "allow_failure": True,
+            "writes": [str(site)],
         },
     )
     if rebase["returncode"] != 0:
@@ -48,6 +50,7 @@ def main() -> int:
                 "argv": ["git", "-C", str(site), "rebase", "--abort"],
                 "cwd": str(site),
                 "allow_failure": True,
+                "writes": [str(site)],
             },
         )
         return stepctx.degrade(

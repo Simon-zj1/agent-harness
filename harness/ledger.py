@@ -473,6 +473,42 @@ class Ledger:
         row = cur.fetchone()
         return dict(row) if row else {}
 
+    def monthly_cost(self, *, now: dt.datetime | None = None) -> float:
+        """Sum known API spend for the current calendar month.
+
+        Runs with ``cost_usd IS NULL`` are intentionally ignored; treating them
+        as free would turn an unmeasured month into a false "under budget".
+        """
+        current = (now or dt.datetime.now().astimezone()).replace(
+            day=1, hour=0, minute=0, second=0, microsecond=0
+        )
+        cur = self._conn.execute(
+            """
+            SELECT COALESCE(SUM(cost_usd), 0.0) AS spent
+            FROM runs
+            WHERE dry_run = 0 AND cost_known = 1 AND started_at >= ?
+            """,
+            (current.isoformat(),),
+        )
+        row = cur.fetchone()
+        return float(row["spent"] or 0.0) if row else 0.0
+
+    def backup(self, destination: Path | None = None) -> Path:
+        """Create a hot backup of the ledger without closing the live handle."""
+        target = destination or self.path.with_name(self.path.name + ".backup")
+        target.parent.mkdir(parents=True, exist_ok=True)
+        backup_conn = sqlite3.connect(target, timeout=10)
+        try:
+            self._conn.backup(backup_conn)
+        finally:
+            backup_conn.close()
+        return target
+
+    def integrity_check(self) -> list[str]:
+        """Return non-ok findings from SQLite's quick integrity check."""
+        rows = self._conn.execute("PRAGMA quick_check").fetchall()
+        return [str(row[0]) for row in rows if str(row[0]).lower() != "ok"]
+
     def close(self) -> None:
         if self in _OPEN:
             _OPEN.remove(self)

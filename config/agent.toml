@@ -13,6 +13,9 @@ mutating_commands = ["git", "rm", "rsync", "cp", "mkdir", "touch"]
 run_timeout_sec = 5400
 step_timeout_sec = 1800
 step_retries = 1
+# Hard monthly ceiling for paid-model runs. Cost is only measured when provider
+# unit prices are set, so this is a lower bound, not a billing guarantee.
+monthly_limit_usd = 20.0
 
 [notify]
 enabled = true
@@ -29,10 +32,11 @@ api_key_env = "DEEPSEEK_API_KEY"
 timeout_sec = 300
 max_retries = 2
 temperature = 0.3
-# Prices are deliberately unset: token counts are always recorded, money is only
-# reported once you fill in your real unit prices.
-# input_per_mtok = 0.0
-# output_per_mtok = 0.0
+# Third-party DeepSeek pricing estimate (Aug 2026). Keep as an assumption until
+# confirmed against the official pricing page; token counts stay recorded even
+# if these are changed.
+input_per_mtok = 0.28
+output_per_mtok = 0.42
 
 # Local model adapter (not used by default). M1 Pro / 16 GB realistically tops
 # out around 7-14B quantised models, so this is for offline or sensitive runs.

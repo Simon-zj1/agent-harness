@@ -1,7 +1,9 @@
-"""A small, explicit agent loop.
+"""A small, explicit agent loop (experimental module).
 
 This is the part that is *ours*: the model is a component, the harness decides
 when to stop, what the tool budget is, and how results are validated.
+The production `daily-trends` compose path currently calls providers directly;
+this loop is kept as a tested experiment rather than presented as the main loop.
 """
 
 from __future__ import annotations
