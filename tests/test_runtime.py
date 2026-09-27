@@ -5,6 +5,7 @@ import unittest
 from pathlib import Path
 
 from harness import memory
+from harness import cli
 from harness.errors import LockBusy
 from harness.ledger import Ledger
 from harness.locks import FileLock
@@ -156,6 +157,12 @@ class RuntimeTests(unittest.TestCase):
         first = Path(run_dir / "artifact-first.json")
         self.assertTrue(first.is_file())
         self.assertEqual(json.loads(first.read_text())["date"], "2026-09-22")
+
+    def test_reserved_env_cannot_be_overridden_from_cli(self) -> None:
+        code = cli.main(
+            ["run", "demo", "--env", "AGENT_RUN_DIR=/tmp/agent-harness-escape"]
+        )
+        self.assertEqual(code, cli.EXIT_USAGE)
 
 
 if __name__ == "__main__":

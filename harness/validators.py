@@ -399,6 +399,7 @@ def refund_decisions_fail_closed(
     path: str | Path,
     *,
     orders_path: str | Path | None = None,
+    expected_path: str | Path | None = None,
     name: str = "refund_decisions_fail_closed",
 ) -> dict[str, Any]:
     """High-stakes variant: an unverifiable refund must never be approved.
@@ -447,7 +448,18 @@ def refund_decisions_fail_closed(
             )
             for order in (book.get("orders") or [])
         }
+    oracle_by_id: dict[str, dict[str, Any]] | None = None
+    if expected_path is not None:
+        try:
+            oracle = load_content(expected_path)
+        except ValidationFailed as exc:
+            return _result(name, False, str(exc), failure_class=FailureClass.MALFORMED)
+        oracle_by_id = {
+            str(order_id): value
+            for order_id, value in (oracle.get("orders") or {}).items()
+        }
     seen_order_ids: set[str] = set()
+    seen_oracle_ids: set[str] = set()
 
     for entry in results:
         order_id = str(entry.get("order_id", "?"))
@@ -482,6 +494,37 @@ def refund_decisions_fail_closed(
                             detail=(
                                 f"action mismatch: artifact says {action!r}, "
                                 f"ground truth says {expected['action']!r}"
+                            ),
+                        )
+                    )
+        if oracle_by_id is not None:
+            oracle_entry = oracle_by_id.get(order_id)
+            if oracle_entry is None:
+                violations.append(
+                    Evidence(
+                        ref=order_id,
+                        detail="decision for an order that is not in the expected-decisions fixture",
+                    )
+                )
+            else:
+                seen_oracle_ids.add(order_id)
+                if decision != oracle_entry.get("decision"):
+                    violations.append(
+                        Evidence(
+                            ref=order_id,
+                            detail=(
+                                f"oracle decision mismatch: artifact says {decision!r}, "
+                                f"fixture says {oracle_entry.get('decision')!r}"
+                            ),
+                        )
+                    )
+                if action != oracle_entry.get("action"):
+                    violations.append(
+                        Evidence(
+                            ref=order_id,
+                            detail=(
+                                f"oracle action mismatch: artifact says {action!r}, "
+                                f"fixture says {oracle_entry.get('action')!r}"
                             ),
                         )
                     )
@@ -612,6 +655,15 @@ def refund_decisions_fail_closed(
                 Evidence(
                     ref="decisions.json",
                     detail=f"missing decisions for orders: {missing_orders}",
+                )
+            )
+    if oracle_by_id is not None:
+        missing_oracle = sorted(set(oracle_by_id) - seen_oracle_ids)
+        if missing_oracle:
+            violations.append(
+                Evidence(
+                    ref="decisions.json",
+                    detail=f"missing decisions for expected orders: {missing_oracle}",
                 )
             )
 

@@ -24,7 +24,7 @@ from .experiment import compare as compare_experiment, load as load_experiment, 
 from .ledger import Ledger
 from .logutil import console
 from .providers import get as get_provider
-from .runtime import RunOptions, Runner, default_date
+from .runtime import RESERVED_STEP_ENV, RunOptions, Runner, default_date
 
 EXIT_OK = 0
 EXIT_FAIL = 1
@@ -250,6 +250,9 @@ def cmd_run(args: argparse.Namespace) -> int:
         key, value = item.split("=", 1)
         if not key or not key.replace("_", "").isalnum():
             console().error(f"--env has an invalid variable name: {key!r}")
+            return EXIT_USAGE
+        if key in RESERVED_STEP_ENV:
+            console().error(f"--env cannot override reserved runtime variable {key!r}")
             return EXIT_USAGE
         extra_env[key] = value
     outcome = runner.run(
@@ -840,11 +843,19 @@ def cmd_verify_eval(args: argparse.Namespace) -> int:
             report, verification_eval.load_baseline(baseline_path)
         )
         if verdict.get("corpus_changed"):
-            log.info(
-                "baseline skipped: corpus changed "
-                f"({verdict.get('baseline_samples')} -> {verdict.get('current_samples')} samples); "
-                "re-freeze with ./agent verify eval --update-baseline"
-            )
+            if args.corpus:
+                log.info(
+                    "baseline skipped: ad-hoc corpus "
+                    f"({verdict.get('current_samples')} samples) is not comparable to "
+                    f"the frozen baseline ({verdict.get('baseline_samples')} samples)"
+                )
+            else:
+                log.error(
+                    "baseline invalid: corpus changed "
+                    f"({verdict.get('baseline_samples')} -> {verdict.get('current_samples')} samples); "
+                    "re-freeze with ./agent verify eval --update-baseline"
+                )
+                return EXIT_FAIL
         elif verdict["compared_matchers"]:
             if verdict["ok"]:
                 log.info(

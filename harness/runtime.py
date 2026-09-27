@@ -24,6 +24,32 @@ from .tools import build_registry
 from .tools.shell_tool import _clean_env
 
 
+RESERVED_STEP_ENV = {
+    "PATH",
+    "HOME",
+    "SHELL",
+    "USER",
+    "PYTHONPATH",
+    "AGENT_HOME",
+    "AGENT_REPO_ROOT",
+    "AGENT_TASKS_DIR",
+    "AGENT_CONFIG",
+    "AGENT_CONTEXT",
+    "AGENT_RUN_ID",
+    "AGENT_RUN_DIR",
+    "AGENT_TASK",
+    "AGENT_DATE",
+    "AGENT_DRY_RUN",
+    "AGENT_PUBLISH",
+    "AGENT_EXECUTOR",
+    "AGENT_STEP_ID",
+    "AGENT_NOTIFY",
+    "AGENT_COMPOSE",
+    "AGENT_CONTEXT_STRATEGY",
+    "AGENT_MEMORY",
+}
+
+
 @dataclass
 class RunOptions:
     task: str
@@ -618,6 +644,13 @@ class Runner:
         env = _clean_env()
         env.update(
             {
+                key: value
+                for key, value in options.extra_env.items()
+                if key not in RESERVED_STEP_ENV
+            }
+        )
+        env.update(
+            {
                 "AGENT_CONTEXT": str(context_path),
                 "AGENT_RUN_DIR": str(run_dir),
                 "AGENT_TASK": task.name,
@@ -644,7 +677,6 @@ class Runner:
         # The fetch step may need the X credential; other steps do not.
         if step_id == "fetch" and os.environ.get("X_BEARER_TOKEN"):
             env["X_BEARER_TOKEN"] = os.environ["X_BEARER_TOKEN"]
-        env.update(options.extra_env)
         return env
 
     def _context_payload(

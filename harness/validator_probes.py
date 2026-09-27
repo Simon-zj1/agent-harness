@@ -25,6 +25,11 @@ from .refund_guard import REQUIRED_CHECKS
 
 EXPECT_PASS = "pass"
 EXPECT_NOT_PASS = "not_pass"
+REFUND_FIXTURES = (
+    Path(__file__).resolve().parent.parent / "tasks" / "refund-guard" / "fixtures"
+)
+ORDERS_PATH = REFUND_FIXTURES / "orders.json"
+EXPECTED_PATH = REFUND_FIXTURES / "expected_decisions.json"
 
 
 @dataclass
@@ -164,6 +169,58 @@ def refund_probes() -> list[Probe]:
             },
             EXPECT_NOT_PASS,
             "a single bad entry must not be averaged away by good neighbours",
+        ),
+        Probe(
+            "refund-oracle-ground-truth",
+            "refund_decisions_fail_closed",
+            {
+                "results": [
+                    _refund_entry("ord_1001", "pass", "approve"),
+                    _refund_entry("ord_1002", "fail", "deny", failed_checks=["refund_window"]),
+                    _refund_entry(
+                        "ord_1003",
+                        "cannot_verify",
+                        "deny",
+                        unverified_checks=["payment_reference"],
+                    ),
+                    _refund_entry("ord_1004", "fail", "deny", failed_checks=["order_status"]),
+                    _refund_entry(
+                        "ord_1005",
+                        "cannot_verify",
+                        "deny",
+                        unverified_checks=["payment_reference", "currency"],
+                    ),
+                ]
+            },
+            EXPECT_PASS,
+            "the artifact matches both the recomputed decisions and the independent expected fixture",
+            kwargs={"orders_path": str(ORDERS_PATH), "expected_path": str(EXPECTED_PATH)},
+        ),
+        Probe(
+            "refund-oracle-mismatch",
+            "refund_decisions_fail_closed",
+            {
+                "results": [
+                    _refund_entry("ord_1001", "pass", "approve"),
+                    _refund_entry("ord_1002", "pass", "approve"),
+                    _refund_entry(
+                        "ord_1003",
+                        "cannot_verify",
+                        "deny",
+                        unverified_checks=["payment_reference"],
+                    ),
+                    _refund_entry("ord_1004", "fail", "deny", failed_checks=["order_status"]),
+                    _refund_entry(
+                        "ord_1005",
+                        "cannot_verify",
+                        "deny",
+                        unverified_checks=["payment_reference", "currency"],
+                    ),
+                ]
+            },
+            EXPECT_NOT_PASS,
+            "a self-consistent artifact must still fail against the independent expected fixture",
+            kwargs={"orders_path": str(ORDERS_PATH), "expected_path": str(EXPECTED_PATH)},
         ),
     ]
 

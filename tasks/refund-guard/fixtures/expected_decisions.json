@@ -1,0 +1,24 @@
+{
+  "orders": {
+    "ord_1001": {
+      "decision": "pass",
+      "action": "approve"
+    },
+    "ord_1002": {
+      "decision": "fail",
+      "action": "deny"
+    },
+    "ord_1003": {
+      "decision": "cannot_verify",
+      "action": "deny"
+    },
+    "ord_1004": {
+      "decision": "fail",
+      "action": "deny"
+    },
+    "ord_1005": {
+      "decision": "cannot_verify",
+      "action": "deny"
+    }
+  }
+}
