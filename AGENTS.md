@@ -33,6 +33,12 @@
     记为告警。新增拦截前先问一句「这个错误会让人去绕闸门吗」。
 12. 站点部署前会跑 `verify release`（在 `blog/tools/deploy.sh` 里）。要发布未过闸门的版本，
     用 `AGENT_RELEASE_GATE=off` 显式跳过，不要默认关掉这道门。
+13. 「我关注什么」写在 `daily-trends/config/interests.json`：`include`（加分方向）、
+    `exclude`（只匹配标题，避免正文里的技术词把噪声救回来）、`override_keywords`
+    （方法/工件名，出现时不排除）。改偏好改这个文件，不要改 `brief.py` 里的规则。
+14. 阅读侧两个闸门：`daily_trends_brief`（速读要选出条目、每条有理由与正文）拦发布；
+    `daily_trends_depth`（正文是否写了机制/证据与边界）只报警。别把深度做成硬拦——
+    要修的是文案，不是停止发布。
 
 ## 验证
 

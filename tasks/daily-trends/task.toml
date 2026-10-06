@@ -122,6 +122,17 @@ args = { content_path = "{run_dir}/content.json", raw_path = "{tools_dir}/data/r
 name = "daily_trends_no_duplicates"
 args = { path = "{run_dir}/content.json" }
 
+# 今日速读：页面顶部那 5 条能不能选出来。（阅读质量的门，不是发布的门。）
+[[validators]]
+name = "daily_trends_brief"
+args = { path = "{run_dir}/content.json", tools_dir = "{tools_dir}", limit = 5 }
+
+# 摘要深度：读得出「做法 + 边界」。只报警不拦发布——要修的是文案，不是停止发布。
+[[validators]]
+name = "daily_trends_depth"
+args = { path = "{run_dir}/content.json", tools_dir = "{tools_dir}", min_ratio = 0.6 }
+required = false
+
 # 生成物漂移闸门：站点仓库里的 sitemap 必须始终可解析、无重复 URL、不累积空行。
 [[validators]]
 name = "sitemap_sane"

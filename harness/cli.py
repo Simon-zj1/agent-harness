@@ -775,6 +775,7 @@ def cmd_verify_content(args: argparse.Namespace) -> int:
         log.info(
             f"  {flag} {row['day']}  ratio={row['verifiable_ratio']} "
             f"fail={row['fail']} orphans={row['orphan_references']} "
+            f"brief={row.get('brief_entries')} depth={row.get('depth_limit_ratio')} "
             f"blockers={','.join(row['blockers']) or '-'}"
         )
     log.info(f"干净 {report['clean']}/{report['days']} 天")
@@ -812,7 +813,26 @@ def cmd_verify_release(args: argparse.Namespace) -> int:
             f"  {mark} {row['day']}  blockers={','.join(row['blockers']) or '-'}  "
             f"ratio={row['verifiable_ratio']}"
         )
-    if not dirty:
+
+    # 尺度：破坏页面/结构的问题拦发布；引用「来自别的某天」是产线用了陈旧素材，
+    # 页面仍然可用，记为告警；只有「任何一天都找不到」的引用才是编造风险，拦发布。
+    blocking: list[dict] = []
+    warned: list[str] = []
+    for row in dirty:
+        hard = [name for name in row["blockers"] if name != "verifiable"]
+        if "verifiable" in row["blockers"]:
+            if (row.get("unknown_citations") or 0) > 0:
+                hard.append("verifiable")
+            else:
+                warned.append(
+                    f"{row['day']}: {row.get('stale_citations')} 条引用来自其它日期的抓取"
+                )
+        if hard:
+            blocking.append({**row, "hard_blockers": hard})
+
+    for line in warned:
+        log.info(f"  warn {line}")
+    if not blocking:
         log.info(f"release gate: {', '.join(target)} 通过全部内容闸门")
         return EXIT_OK
 
@@ -825,11 +845,9 @@ def cmd_verify_release(args: argparse.Namespace) -> int:
     (outdir / "report.md").write_text(detail, encoding="utf-8")
     log.error(
         "release gate: 内容未通过验收，阻止发布 —— "
-        + "; ".join(f"{row['day']}: {','.join(row['blockers'])}" for row in dirty)
+        + "; ".join(f"{row['day']}: {','.join(row['hard_blockers'])}" for row in blocking)
     )
-    for row in dirty:
-        log.error(f"  详情见 {outdir / 'report.md'}")
-        break
+    log.error(f"  详情见 {outdir / 'report.md'}")
     log.error("  修好内容后重试；确实要发布未过闸门的版本：AGENT_RELEASE_GATE=off")
     return EXIT_FAIL
 

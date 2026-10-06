@@ -417,8 +417,13 @@ def content_debt(days: Iterable[str], *, root: Path | None = None) -> dict[str, 
         references = validators_mod.daily_trends_references(content)
         verifiable = validators_mod.daily_trends_verifiable(content, raw)
         duplicates = validators_mod.daily_trends_no_duplicates(content)
+        tools_root = (root or data_dir()).parent
+        brief = validators_mod.daily_trends_brief(content, tools_dir=tools_root)
+        depth = validators_mod.daily_trends_depth(content, tools_dir=tools_root)
         structure_metrics = structure.get("metrics") or {}
         duplicate_metrics = duplicates.get("metrics") or {}
+        brief_metrics = brief.get("metrics") or {}
+        depth_metrics = depth.get("metrics") or {}
         # `cannot_verify` on structure is the signature of the gate being stale
         # about the article's shape, which is a different problem from content
         # that actually violates the contract. Conflating the two is what made
@@ -445,9 +450,18 @@ def content_debt(days: Iterable[str], *, root: Path | None = None) -> dict[str, 
                 "unknown_sections": structure_metrics.get("unknown_sections"),
                 "references": references.get("ok"),
                 "verifiable": verifiable.get("ok"),
+                "stale_citations": (verifiable.get("metrics") or {}).get("stale_citations"),
+                "unknown_citations": (
+                    (verifiable.get("metrics") or {}).get("fail", 0)
+                    - (verifiable.get("metrics") or {}).get("stale_citations", 0)
+                ),
                 "duplicates": duplicates.get("ok"),
                 "duplicate_pairs": duplicate_metrics.get("duplicate_pairs"),
                 "borderline_pairs": duplicate_metrics.get("borderline_pairs"),
+                "brief_entries": brief_metrics.get("entries"),
+                "brief_excluded": brief_metrics.get("excluded"),
+                "depth_limit_ratio": depth_metrics.get("limit_ratio"),
+                "depth_without_substance": depth_metrics.get("without_substance"),
                 "verifiable_ratio": (verifiable.get("metrics") or {}).get(
                     "verifiable_ratio"
                 ),
@@ -487,12 +501,14 @@ def content_debt_markdown(report: dict[str, Any]) -> str:
         f"- {report.get('clean_with_warnings', 0)} 天通过但有告警（如未引用的孤立参考文献）："
         "这类问题不拦发布，只记录，避免把闸门变成必须被绕过的噪声",
         "",
-        "| 日期 | 形状 | 结构 | 引用 | 可核验 | 可核验率 | 重复 | 灰区 | 孤儿引用 | 告警 | 卡在哪 |",
-        "| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |",
+        "| 日期 | 形状 | 结构 | 引用 | 可核验 | 可核验率 | 重复 | 灰区 | 速读 | 深度 | 孤儿引用 | 告警 | 卡在哪 |",
+        "| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |",
     ]
     for row in report["rows"]:
         mark = lambda ok: "ok" if ok else "**FAIL**"  # noqa: E731
         ratio = row["verifiable_ratio"]
+        depth = row.get("depth_limit_ratio")
+        depth_text = "—" if depth is None else f"{depth:.2f}"
         variants = row.get("body_variants") or {}
         shape = (
             "未声明"
@@ -504,6 +520,8 @@ def content_debt_markdown(report: dict[str, Any]) -> str:
             f"{mark(row['verifiable'])} | {'—' if ratio is None else f'{ratio:.2f}'} | "
             f"{row.get('duplicate_pairs') if row.get('duplicate_pairs') is not None else '—'} | "
             f"{row.get('borderline_pairs') if row.get('borderline_pairs') is not None else '—'} | "
+            f"{row.get('brief_entries') if row.get('brief_entries') is not None else '—'} | "
+            f"{depth_text} | "
             f"{row['orphan_references']} | {row.get('warnings', 0)} | "
             f"{', '.join(row['blockers']) or '—'} |"
         )
@@ -517,6 +535,8 @@ def content_debt_markdown(report: dict[str, Any]) -> str:
         "  应当去补契约或改产线，而不是去修历史稿件。",
         "- `重复` 是同一篇里同一件事出现两次的硬重复（字符串可证）；`灰区` 是需要人工/模型",
         "  判断的相似对，闸门不做模型调用，所以只报数不判。",
+        "- `速读` 是页面顶部「今日速读」选出的条数；`深度` 是正文里写了边界/限制的条目占比。",
+        "  这两列衡量的是**读得懂吗**：结构全过但深度很低，说明这天只有事件没有信息量。",
         "- `可核验`列的失败信息会区分两种情况：引用的 URL 出现在**别的某一天**的抓取里",
         "  （产线用了陈旧素材，例如 10-05 引了 10-04 的 arXiv），或**任何一天都没有**",
         "  （编造风险更高）。这两种问题要分开修。",

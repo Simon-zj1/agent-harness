@@ -216,6 +216,32 @@ class ReleaseGateTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertIn("skipped", result.stdout)
 
+    def test_stale_from_another_day_warns_instead_of_blocking(self) -> None:
+        """Reused material from yesterday degrades the page; it does not break it.
+
+        A citation that exists in *no* capture is a fabrication risk and blocks;
+        one that exists in yesterday's capture is a producer bug and only warns.
+        """
+        (self.root / "raw" / "2026-01-01.json").write_text(
+            json.dumps({"hn": [{"title": "t", "url": "https://example.com/yesterday"}]}),
+            encoding="utf-8",
+        )
+        (self.root / "raw" / "2026-01-02.json").write_text(
+            json.dumps({"hn": [{"title": "t", "url": "https://example.com/today"}]}),
+            encoding="utf-8",
+        )
+        content = _content(
+            references=[{"id": 1, "title": "yesterday", "url": "https://example.com/yesterday"}],
+            sources=[1],
+        )
+        content["date"] = "2026-01-02"
+        (self.root / "2026-01-02.json").write_text(
+            json.dumps(content, ensure_ascii=False), encoding="utf-8"
+        )
+        result = self._gate("--days", "1")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("来自其它日期的抓取", result.stdout)
+
 
 if __name__ == "__main__":
     unittest.main()

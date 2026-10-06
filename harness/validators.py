@@ -963,6 +963,168 @@ def pr_merge_gate(
     )
 
 
+def _load_brief_module(tools_dir: str | Path):
+    """Import the brief selector that lives in the daily-trends tools checkout.
+
+    The brief is editorial logic (what to show), so it lives with the renderer
+    and the interests config; the gate imports the same module so "the brief on
+    the page" and "the brief that was verified" cannot diverge.
+    """
+    import importlib.util
+
+    path = Path(tools_dir) / "tools" / "brief.py"
+    if not path.is_file():
+        return None
+    spec = importlib.util.spec_from_file_location("daily_trends_brief_module", path)
+    if spec is None or spec.loader is None:
+        return None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+@validator("daily_trends_brief")
+def daily_trends_brief(
+    path: str | Path,
+    *,
+    tools_dir: str | Path,
+    limit: int = 5,
+    name: str = "daily_trends_brief",
+) -> dict[str, Any]:
+    """今日速读：能不能挑出「你真正要读的 5 条」，且每条结构完整。
+
+    This is the gate for the reading half of the product, not the publishing
+    half: the article may be complete and still useless if the top of the page
+    is 36 unsorted items. Structure blocks; how *deep* each summary is does not
+    (that is `daily_trends_depth`, and it warns).
+    """
+    try:
+        content = load_content(path)
+    except ValidationFailed as exc:
+        return _result(name, False, str(exc))
+    module = _load_brief_module(tools_dir)
+    if module is None:
+        return _result(
+            name,
+            False,
+            f"brief selector not found under {tools_dir}",
+            decision=Decision.CANNOT_VERIFY,
+            failure_class=FailureClass.PRECONDITION_UNKNOWN,
+            remediation="Check the task's {tools_dir} path: tools/brief.py must exist.",
+            metrics={"entries": 0},
+        )
+    try:
+        payload = module.select_brief(content, limit=limit)
+    except Exception as exc:  # noqa: BLE001 - a crashing selector is a result
+        return _result(
+            name,
+            False,
+            f"brief selection raised {type(exc).__name__}: {exc}",
+            decision=Decision.CANNOT_VERIFY,
+            failure_class=FailureClass.INTERNAL_ERROR,
+            metrics={"entries": 0},
+        )
+
+    entries = payload.get("entries") or []
+    failures: list[dict[str, Any]] = []
+    if not entries:
+        failures.append(
+            {
+                "issue": "brief selected nothing — every candidate was filtered out "
+                "or no item matched the interest profile"
+            }
+        )
+    if len(entries) > limit:
+        failures.append({"issue": f"brief has {len(entries)} entries (limit {limit})"})
+    for entry in entries:
+        title = (entry.get("title") or {}).get("zh") or (entry.get("title") or {}).get("en") or "?"
+        if not (entry.get("body") or {}).get("zh"):
+            failures.append({"issue": "brief entry has no zh body", "title": title[:40]})
+        if not entry.get("why_zh"):
+            failures.append({"issue": "brief entry does not say why it was picked", "title": title[:40]})
+
+    metrics = {
+        "entries": len(entries),
+        "candidates": payload.get("candidates"),
+        "excluded": payload.get("excluded"),
+        "without_limit_statement": payload.get("without_limit"),
+    }
+    ok = not failures
+    return _result(
+        name,
+        ok,
+        f"brief ok ({len(entries)} entries from {payload.get('candidates')} candidates, "
+        f"{payload.get('excluded')} filtered by interest profile)"
+        if ok
+        else f"{len(failures)} brief problem(s)",
+        failures=failures[:20],
+        remediation="Fix the interest config or the content before publishing."
+        if not ok
+        else None,
+        metrics=metrics,
+    )
+
+
+@validator("daily_trends_depth")
+def daily_trends_depth(
+    path: str | Path,
+    *,
+    tools_dir: str | Path,
+    min_ratio: float = 0.6,
+    name: str = "daily_trends_depth",
+) -> dict[str, Any]:
+    """摘要深度：读完能说出这项技术在做什么吗。
+
+    Measured per item: does the text contain a mechanism/evidence word and a
+    limitation? A day can be structurally perfect and still be unreadable
+    ("某公司发布了某模型"), which is the failure the reader actually feels.
+    Reported as warnings, not blockers: the fix is a rewrite, not a stop-the-line.
+    """
+    try:
+        content = load_content(path)
+    except ValidationFailed as exc:
+        return _result(name, False, str(exc))
+    module = _load_brief_module(tools_dir)
+    if module is None:
+        return _result(
+            name,
+            False,
+            f"depth signals unavailable: {tools_dir}/tools/brief.py not found",
+            decision=Decision.CANNOT_VERIFY,
+            failure_class=FailureClass.PRECONDITION_UNKNOWN,
+            metrics={"items": 0},
+        )
+
+    shallow: list[dict[str, Any]] = []
+    no_limit: list[str] = []
+    items = 0
+    for _section, _location, item in module.iter_items(content):
+        items += 1
+        body = module.bi_text(item)
+        signals = module.depth_signals(body.get("zh") or body.get("en") or "")
+        title = (module.bi_title(item).get("zh") or "")[:40]
+        if not signals["has_substance"]:
+            shallow.append({"issue": "no mechanism or evidence in the summary", "title": title})
+        if not signals["has_limit"]:
+            no_limit.append(title)
+
+    ratio = 1.0 if not items else (items - len(no_limit)) / items
+    warnings = [{"issue": "summary states no limitation", "title": t} for t in no_limit[:10]]
+    metrics = {
+        "items": items,
+        "with_limit": items - len(no_limit),
+        "limit_ratio": round(ratio, 3),
+        "without_substance": len(shallow),
+    }
+    detail = (
+        f"{items - len(no_limit)}/{items} summaries state a limitation "
+        f"(mechanism/evidence missing in {len(shallow)})"
+    )
+    if ratio < min_ratio:
+        detail += f" — below the {min_ratio:.0%} target"
+    return _result(name, True, detail, warnings=warnings, metrics=metrics)
+
+
 @validator("sitemap_sane")
 def sitemap_sane(
     path: str | Path,
