@@ -630,6 +630,7 @@ def cmd_launchd_status(args: argparse.Namespace) -> int:
 def cmd_doctor(args: argparse.Namespace) -> int:
     log = console()
     problems: list[str] = []
+    warnings: list[str] = []
 
     log.info(f"python      : {sys.version.split()[0]}")
     if sys.version_info < (3, 11):
@@ -675,9 +676,12 @@ def cmd_doctor(args: argparse.Namespace) -> int:
                 problems.append(f"{name}: cannot resolve readable path {entry!r}: {exc}")
                 continue
             if not resolved.exists():
-                problems.append(
-                    f"{name}: readable path does not exist: {resolved} "
-                    f"(set the task's environment override or clone the dependency)"
+                # 外部依赖缺失只算告警：另外两个任务不依赖它，而这个任务真正开跑时
+                # 会在同一句话上失败。把它算成 doctor 失败，等于让人第一次 clone
+                # 下来就看到「环境坏了」，而实际上只有这一个任务不可用。
+                warnings.append(
+                    f"{name}: 外部依赖缺失，该任务暂不可用: {resolved} "
+                    f"(设任务的环境变量覆盖，或把依赖 clone 到该路径)"
                 )
         if str((task.trigger or {}).get("type", "")).lower() == "launchd":
             try:
@@ -715,12 +719,16 @@ def cmd_doctor(args: argparse.Namespace) -> int:
         problems.append(f"ledger backup failed: {exc}")
     log.info(f"now         : {dt.datetime.now().astimezone().isoformat(timespec='seconds')}")
 
+    if warnings:
+        log.info("warnings:")
+        for warning in warnings:
+            log.info(f"  - {warning}")
     if problems:
         log.error("problems:")
         for problem in problems:
             log.error(f"  - {problem}")
         return EXIT_FAIL
-    log.info("all checks passed")
+    log.info("all checks passed" if not warnings else "all checks passed (有告警，见上)")
     return EXIT_OK
 
 

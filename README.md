@@ -29,6 +29,37 @@ cd /path/to/agent-harness
 同级的 `../daily-trends/data`，也可以用 `DAILY_TRENDS_DATA_DIR` 显式覆盖；`doctor`
 会检查任务声明的外部读取路径是否存在。
 
+## 别人 clone 下来能做什么
+
+这是一个**架子 + 三个可跑的负载**，不是一个开箱即用的产品。clone 之后：
+
+| 能力 | 开箱可用？ | 说明 |
+| --- | --- | --- |
+| 内核：任务声明、幂等运行、锁、台账、记忆、权限模型、typed decision | ✅ | `./agent run/status/runs/report/annotate/backup/memory` 都能用 |
+| `refund-guard` | ✅ | 自带夹具，演示「模型提议、确定性校验裁决、无法核对的前提一律拒绝」（fail-closed） |
+| `pr-guard` | ✅ | 对一段 git 变更做三个独立判决（测试/架构/波及范围），任一无法核验就不自动合并；结论取决于你指给它的 diff |
+| `verify probes` | ✅ | 34 个对抗探针，不依赖任何外部数据 |
+| 测试套件 | ✅ | `python3 -m unittest discover -t . -s tests`（缺外部依赖的用例会 skip） |
+| `verify eval` / `verify content` / `verify release` | ⚠️ | 需要 `daily-trends` 抓取数据；没有时会明确报「没有语料/没有当天内容」 |
+| `daily-trends` 任务 | ⚠️ | 需要仓库外的 `daily-trends` 工具与数据（见下） |
+
+`./agent doctor` 会把缺失的外部依赖列为**告警**而不是失败：只有那一个任务不可用，
+其余两个任务与内核照常工作。
+
+### 要把它变成「你的」
+
+三处就够了，都不需要动内核：
+
+1. **换模型与预算**：`config/agent.toml`（provider / executor / 预算 / 通知）。
+2. **加一个自己的任务**：复制 `tasks/daily-trends/` 的结构，写 `task.toml`
+   （步骤、工具白名单、可写路径、校验器、预算、失败策略），步骤脚本放在 `steps/`。
+   路径一律写成 `${VAR:-默认值}`，换机器不用改文件。
+3. **接你的数据源与验收**：自己的数据目录用环境变量指过去；验收标准写进
+   `harness/validators.py` 并挂到 `task.toml`，不要写成提示词里的一句话。
+
+想直接跑参考负载 `daily-trends`，需要把它的工具与数据放到 `../daily-trends`
+（或用 `DAILY_TRENDS_DIR` 指过去），那是另一个仓库（私有）。
+
 ## 现状与差距（2026-10-06 实测，不是目标）
 
 - **发布是单一写入者**：站点由 `blog/tools/deploy.sh`（Hexo）生成并发布，本仓库

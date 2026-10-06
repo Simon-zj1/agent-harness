@@ -132,6 +132,10 @@ class BriefGateTests(unittest.TestCase):
         self.assertTrue(result["ok"], result.get("failures"))
 
 
+@unittest.skipUnless(
+    (TOOLS_SOURCE / "tools" / "brief.py").is_file(),
+    "requires the sibling daily-trends checkout",
+)
 class DepthGateTests(unittest.TestCase):
     def setUp(self) -> None:
         self._tmp = tempfile.TemporaryDirectory()
