@@ -41,6 +41,9 @@ class Probe:
     note: str = ""
     # Extra keyword arguments for the validator, besides the payload path.
     kwargs: dict[str, Any] = field(default_factory=dict)
+    #: 额外输入文件（文件名 -> JSON 内容）。覆盖度这类需要「两个文件」的校验器
+    #: 以前没法做探针；`{tmp}` 会在 kwargs 里替换成临时目录。
+    extra_files: dict[str, Any] = field(default_factory=dict)
 
 
 def _refund_entry(
@@ -519,7 +522,48 @@ def probe_registry() -> dict[str, Callable[[], list[Probe]]]:
         "schema": schema_probes,
         "dedup": duplicate_probes,
         "references": reference_probes,
+        "coverage": coverage_probes,
     }
+
+
+def coverage_probes() -> list[Probe]:
+    """Probes for `daily_trends_coverage`.
+
+    不变量：这是**告警级**闸门——它会把没写进去的高信号条目报出来，但不能因此
+    变成拦截（严重度由 task.toml 的 required 决定，见 SeverityDeclarationTests）。
+    """
+    content = _article()
+    raw = {
+        "hn": [
+            {"title": "Agent harness benchmark 发布", "url": "https://ex.com/agent", "points": 900},
+            {"title": "Bob Cringely has died", "url": "https://ex.com/obit", "points": 800},
+        ]
+    }
+    covered_content = _article()
+    covered_content["references"] = [
+        {"id": 1, "title": "cited", "url": "https://ex.com/agent"}
+    ]
+
+    return [
+        Probe(
+            "coverage-uncited-top-item-is-advisory",
+            "daily_trends_coverage",
+            content,
+            EXPECT_PASS,
+            "高信号条目没写进去只告警：报出来但不拦发布",
+            kwargs={"raw_path": "{tmp}/raw.json"},
+            extra_files={"raw.json": raw},
+        ),
+        Probe(
+            "coverage-cited-top-item-is-quiet",
+            "daily_trends_coverage",
+            covered_content,
+            EXPECT_PASS,
+            "被引用的高信号条目不进漏报名单",
+            kwargs={"raw_path": "{tmp}/raw.json"},
+            extra_files={"raw.json": raw},
+        ),
+    ]
 
 
 def reference_probes() -> list[Probe]:
@@ -589,8 +633,19 @@ def run_probes(probes: list[Probe]) -> dict[str, Any]:
             path.write_text(
                 json.dumps(probe.payload, ensure_ascii=False), encoding="utf-8"
             )
+            for filename, content in (probe.extra_files or {}).items():
+                extra = Path(tmp) / filename
+                extra.write_text(json.dumps(content, ensure_ascii=False), encoding="utf-8")
+            kwargs = {
+                key: (
+                    value.replace("{tmp}/", str(Path(tmp)) + "/")
+                    if isinstance(value, str) and "{tmp}" in value
+                    else value
+                )
+                for key, value in (probe.kwargs or {}).items()
+            }
             try:
-                result = func(path, **probe.kwargs)
+                result = func(path, **kwargs)
             except Exception as exc:  # noqa: BLE001 - a crashing validator is a result
                 result = {
                     "ok": False,

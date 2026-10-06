@@ -396,7 +396,29 @@ def available_days(*, root: Path | None = None) -> list[str]:
     return days
 
 
-def content_debt(days: Iterable[str], *, root: Path | None = None) -> dict[str, Any]:
+_SHORT_NAMES = {
+    "daily_trends_structure": "structure",
+    "daily_trends_references": "references",
+    "daily_trends_verifiable": "verifiable",
+    "daily_trends_no_duplicates": "duplicates",
+    "daily_trends_brief": "brief",
+    "daily_trends_depth": "depth",
+    "daily_trends_coverage": "coverage",
+}
+
+
+def _short_validator_name(name: str) -> str:
+    """Map a task-declared validator name to the short key used in this report."""
+    return _SHORT_NAMES.get(name, name)
+
+
+def content_debt(
+    days: Iterable[str],
+    *,
+    root: Path | None = None,
+    required: Iterable[str] | None = None,
+    tools_dir: Path | None = None,
+) -> dict[str, Any]:
     """Run the content gates across days and report what is still broken.
 
     The gate blocks a run at the time it happens. That leaves history: days that
@@ -417,7 +439,8 @@ def content_debt(days: Iterable[str], *, root: Path | None = None) -> dict[str, 
         references = validators_mod.daily_trends_references(content)
         verifiable = validators_mod.daily_trends_verifiable(content, raw)
         duplicates = validators_mod.daily_trends_no_duplicates(content)
-        tools_root = (root or data_dir()).parent
+        # tools 路径优先来自 task.toml（唯一事实来源）；只有没给时才从数据目录推断。
+        tools_root = tools_dir or (root or data_dir()).parent
         brief = validators_mod.daily_trends_brief(content, tools_dir=tools_root)
         depth = validators_mod.daily_trends_depth(content, tools_dir=tools_root)
         coverage = validators_mod.daily_trends_coverage(
@@ -433,15 +456,30 @@ def content_debt(days: Iterable[str], *, root: Path | None = None) -> dict[str, 
         # that actually violates the contract. Conflating the two is what made
         # this report say "3/16 clean" for nine days.
         gate_stale = structure.get("decision") == "cannot_verify"
+        # 严重度只有一个事实来源：task.toml 里的 `required`。以前这里硬编码了一份
+        # 名单，于是「required=false 的闸门」在 run 路径上是告警、在 release 路径上
+        # 却可能被当成拦截，同一个闸门两种含义。
+        evaluated = {
+            "structure": structure,
+            "references": references,
+            "verifiable": verifiable,
+            "duplicates": duplicates,
+            "brief": brief,
+            "depth": depth,
+            "coverage": coverage,
+        }
+        # task.toml 写的是完整校验器名（daily_trends_structure），这里用短名分桶；
+        # 两边名字不一致会让 `name in required_names` 永远为假 —— 于是所有天都
+        # 「没有 blocker」，09-20 从 FAIL 变成 ok*。必须显式映射。
+        required_names = (
+            {_short_validator_name(name) for name in required}
+            if required is not None
+            else {"structure", "references", "verifiable", "duplicates"}
+        )
         blockers = [
             name
-            for name, result in (
-                ("structure", structure),
-                ("references", references),
-                ("verifiable", verifiable),
-                ("duplicates", duplicates),
-            )
-            if not result.get("ok")
+            for name, result in evaluated.items()
+            if name in required_names and not result.get("ok")
         ]
         rows.append(
             {
@@ -467,6 +505,8 @@ def content_debt(days: Iterable[str], *, root: Path | None = None) -> dict[str, 
                 "depth_limit_ratio": depth_metrics.get("limit_ratio"),
                 "depth_without_substance": depth_metrics.get("without_substance"),
                 "coverage_pool": coverage_metrics.get("pool"),
+                "coverage_missed": coverage_metrics.get("missed"),
+                "coverage_on_topic_missed": coverage_metrics.get("missed_on_topic"),
                 "coverage_top3_missed": coverage_metrics.get("top3_missed"),
                 "coverage_examples": [
                     w.get("title", "")[:48] for w in (coverage.get("warnings") or [])[:3]

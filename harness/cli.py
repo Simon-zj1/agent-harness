@@ -753,13 +753,45 @@ def cmd_verify_probes(args: argparse.Namespace) -> int:
     return EXIT_OK if report["ok"] else EXIT_FAIL
 
 
+def _required_validators(task: str = "daily-trends") -> set[str] | None:
+    """Which gates block a release — read from the task declaration.
+
+    `verify content` / `verify release` used to decide severity from their own
+    hardcoded list while a run decided it from `task.toml.required`. Flipping a
+    gate between warn and block therefore changed one path and not the other.
+    """
+    try:
+        spec = taskspec.load(task)
+    except Exception:  # noqa: BLE001 - a missing task must not break diagnosis
+        return None
+    return {validator.name for validator in spec.validators if validator.required}
+
+
+def _task_tools_dir(task: str = "daily-trends") -> Path | None:
+    """The tools checkout declared by the task — one source for every gate path."""
+    try:
+        spec = taskspec.load(task)
+    except Exception:  # noqa: BLE001
+        return None
+    raw = spec.paths_table.get("tools_dir")
+    if not raw:
+        return None
+    rendered = taskspec.render(raw, date=spec.date_mode)
+    path = Path(rendered).expanduser()
+    # NB: 必须用展开后的字符串拼路径。第一版用了未展开的 `raw`，于是返回值里带着
+    # `${DAILY_TRENDS_DIR:-...}` 字面量，brief/depth/coverage 全都找不到模块。
+    return (path if path.is_absolute() else (spec.dir / rendered)).resolve()
+
+
 def cmd_verify_content(args: argparse.Namespace) -> int:
     log = console()
     days = args.days or verification_eval.available_days()
     if not days:
         log.error("no day has both a capture and a composed article")
         return EXIT_FAIL
-    report = verification_eval.content_debt(days)
+    report = verification_eval.content_debt(
+        days, required=_required_validators(), tools_dir=_task_tools_dir()
+    )
     outdir = paths.runs_dir() / "verification" / "content-debt"
     outdir.mkdir(parents=True, exist_ok=True)
     (outdir / "report.md").write_text(
@@ -804,7 +836,9 @@ def cmd_verify_release(args: argparse.Namespace) -> int:
         log.error("release gate: no day has both a capture and a composed article")
         return EXIT_FAIL
     target = days[-max(1, args.days) :]
-    report = verification_eval.content_debt(target)
+    report = verification_eval.content_debt(
+        target, required=_required_validators(), tools_dir=_task_tools_dir()
+    )
     dirty = [row for row in report["rows"] if not row["clean"]]
 
     for row in report["rows"]:
@@ -834,10 +868,12 @@ def cmd_verify_release(args: argparse.Namespace) -> int:
         log.info(f"  warn {line}")
     for row in report["rows"]:
         examples = row.get("coverage_examples") or []
-        if examples:
+        if examples or row.get("coverage_pool"):
             log.info(
-                f"  cover {row['day']}: 来源前 3 名漏 {row.get('coverage_top3_missed')} 条"
-                f"（例：{'；'.join(examples[:2])}）"
+                f"  cover {row['day']}: 高信号漏 {row.get('coverage_missed')} 条"
+                f"（命中方向 {row.get('coverage_on_topic_missed')}、来源前 3 名 "
+                f"{row.get('coverage_top3_missed')}）"
+                + (f"；例：{'；'.join(examples[:3])}" if examples else "")
             )
     if not blocking:
         log.info(f"release gate: {', '.join(target)} 通过全部内容闸门")

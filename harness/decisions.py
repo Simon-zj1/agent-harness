@@ -220,7 +220,11 @@ def combine(results: Iterable[dict[str, Any]]) -> dict[str, Any]:
     }
 
 
-def repair_brief(results: Iterable[dict[str, Any]]) -> dict[str, Any]:
+def repair_brief(
+    results: Iterable[dict[str, Any]],
+    *,
+    required_names: Iterable[str] | None = None,
+) -> dict[str, Any]:
     """Turn a blocked run into something actionable.
 
     A gate that only says "no" leaves the operator to reverse-engineer which
@@ -228,9 +232,17 @@ def repair_brief(results: Iterable[dict[str, Any]]) -> dict[str, Any]:
     receipts (evidence) and the fix (remediation) — this collects them into one
     machine-readable brief so a human or a repair step has somewhere to start.
     """
+    required = set(required_names) if required_names is not None else None
     entries: list[dict[str, Any]] = []
+    warnings: list[str] = []
     for result in results:
         if result.get("ok"):
+            continue
+        # A gate the task declared optional (`required = false`) must never be
+        # reported as "blocking": the coverage gate warns on purpose, and the
+        # ledger saying otherwise made a passing run look blocked.
+        if required is not None and result.get("name") not in required:
+            warnings.append(result.get("name", "?"))
             continue
         raw = result.get("decision")
         decision = raw if raw is not None else Decision.FAIL.value
@@ -248,6 +260,7 @@ def repair_brief(results: Iterable[dict[str, Any]]) -> dict[str, Any]:
         )
     return {
         "blocking": [entry["validator"] for entry in entries],
+        "warnings": warnings,
         "count": len(entries),
         "entries": entries,
     }

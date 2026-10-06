@@ -357,12 +357,17 @@ class Runner:
             metrics["verification"] = decisions.combine(validation_results)
             # A blocked run should leave behind something a human or a repair
             # step can act on: which claim broke, the receipts, and the fix.
-            brief = decisions.repair_brief(validation_results)
+            brief = decisions.repair_brief(
+                validation_results,
+                required_names=[spec.name for spec in task.validators if spec.required],
+            )
             if brief["count"]:
                 (run_dir / "validation-failures.json").write_text(
                     json.dumps(brief, ensure_ascii=False, indent=2), encoding="utf-8"
                 )
                 metrics["blocking_validators"] = brief["blocking"]
+            if brief.get("warnings"):
+                metrics["warning_validators"] = brief["warnings"]
             required_failed = [
                 result
                 for result, spec in zip(validation_results, task.validators)
