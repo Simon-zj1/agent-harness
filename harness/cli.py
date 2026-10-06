@@ -832,6 +832,13 @@ def cmd_verify_release(args: argparse.Namespace) -> int:
 
     for line in warned:
         log.info(f"  warn {line}")
+    for row in report["rows"]:
+        examples = row.get("coverage_examples") or []
+        if examples:
+            log.info(
+                f"  cover {row['day']}: 来源前 3 名漏 {row.get('coverage_top3_missed')} 条"
+                f"（例：{'；'.join(examples[:2])}）"
+            )
     if not blocking:
         log.info(f"release gate: {', '.join(target)} 通过全部内容闸门")
         return EXIT_OK

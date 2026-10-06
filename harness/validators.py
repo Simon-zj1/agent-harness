@@ -1298,6 +1298,201 @@ def daily_trends_index(
     )
 
 
+@validator("daily_trends_coverage")
+def daily_trends_coverage(
+    content_path: str | Path,
+    raw_path: str | Path,
+    *,
+    tools_dir: str | Path | None = None,
+    top_per_source: int = 10,
+    sample: int = 6,
+    name: str = "daily_trends_coverage",
+) -> dict[str, Any]:
+    """今天最热的那批东西，有多少真的写进去了？
+
+    Every other gate looks at what *is* in the article. This one looks at what is
+    not: the highest-signal rows of the day's capture that never got cited. For a
+    reader who wants to keep up, a miss costs more than a marginal extra item, so
+    the misses are listed by name instead of being counted.
+
+    Reported as warnings only. Skipping a high-engagement item is a legitimate
+    editorial choice (off-topic, marketing, duplicate of a better source); the
+    point is that the choice becomes visible rather than silent.
+    """
+    try:
+        content = load_content(content_path)
+    except ValidationFailed as exc:
+        return _result(name, False, str(exc))
+    raw_file = Path(raw_path)
+    if not raw_file.is_file():
+        return _result(
+            name,
+            False,
+            f"missing raw capture: {raw_file}",
+            decision=Decision.CANNOT_VERIFY,
+            failure_class=FailureClass.PRECONDITION_UNKNOWN,
+            metrics={"pool": 0},
+        )
+    raw = json.loads(raw_file.read_text(encoding="utf-8"))
+    cited = {canonical_url(url) for url in _cited_urls(content)}
+    brief_mod = _load_brief_module(tools_dir) if tools_dir else None
+    pool = _high_signal_pool(
+        raw,
+        top_per_source=top_per_source,
+        target_date=str(content.get("date") or raw_file.stem),
+        brief_mod=brief_mod,
+    )
+    if not pool:
+        return _result(
+            name,
+            True,
+            "no high-signal pool to compare against (capture has no engagement data)",
+            warnings=[],
+            metrics={"pool": 0, "covered": 0, "pool_coverage_ratio": None},
+        )
+
+    missed = [entry for entry in pool if canonical_url(entry["url"]) not in cited]
+    # 排序按「来源内排名」而不是原始顺序：漏掉某个来源当天第 1 名，比漏掉第 9 名更值得看。
+    missed.sort(key=lambda entry: (entry["rank_in_source"], entry["source"]))
+    covered = len(pool) - len(missed)
+    ratio = covered / len(pool)
+    top3_missed = [entry for entry in missed if entry["rank_in_source"] <= 3]
+    metrics = {
+        "pool": len(pool),
+        "covered": covered,
+        # 覆盖率只是参考值：文章每天大约引用 40 条，池子是「每个来源前 10」，
+        # 两者本来就不该相等。真正要看的是下面这个 top3_missed。
+        "pool_coverage_ratio": round(ratio, 3),
+        "missed": len(missed),
+        "top3_missed": len(top3_missed),
+        # 池子是否按「我关注什么」筛过：没筛过时，漏掉的多半本来就不是你看的方向。
+        "topic_filter": "brief" if brief_mod else "off",
+    }
+    warnings = [
+        {
+            "issue": f"high-signal item not in the article: {entry['signal']}",
+            "title": entry["title"][:60],
+            "url": entry["url"],
+            "source": entry["source"],
+        }
+        for entry in missed[:sample]
+    ]
+    if top3_missed:
+        worst = ", ".join(
+            f"{entry['source']}#{entry['rank_in_source']}" for entry in top3_missed[:4]
+        )
+        detail = f"missed {len(top3_missed)} top-3 item(s) of their source: {worst}"
+    else:
+        detail = f"every source's top-3 was covered ({covered}/{len(pool)} of the pool)"
+    return _result(name, True, detail, warnings=warnings, metrics=metrics)
+
+
+def _cited_urls(content: dict[str, Any]) -> list[str]:
+    references = {ref.get("id"): str(ref.get("url", "")) for ref in content.get("references") or []}
+    used: set[int] = set()
+    for section in content.get("sections") or []:
+        items = list(section.get("items") or [])
+        for group in section.get("groups") or []:
+            items.extend(group.get("items") or [])
+        for item in items:
+            used.update(s for s in (item.get("sources") or []) if isinstance(s, int))
+    return [references[i] for i in used if references.get(i)]
+
+
+_SIGNAL_KEYS = (
+    ("hn", "title", "url", "points", "HN"),
+    ("github", "full_name", "html_url", "stars_per_day", "GitHub"),
+    ("arxiv", "title", "url", "published", "arXiv"),
+    ("techmeme", "title", "url", "hour", "Techmeme"),
+)
+
+
+def _high_signal_pool(
+    raw: dict[str, Any],
+    *,
+    top_per_source: int,
+    target_date: str = "",
+    brief_mod: Any | None = None,
+) -> list[dict[str, Any]]:
+    """Top *on-topic* rows per source family, ranked by engagement.
+
+    Two false-positive sources, both hit in the first version:
+
+    * `tweets_evergreen` spans the whole window, so one 31k-like post ("AGENTS.md
+      in Claude Code") was reported as a miss on four consecutive days. Only the
+      target date's posts count as today's signal, and content-free link posts
+      are dropped.
+    * without a topic filter the pool fills with high-engagement items that have
+      nothing to do with this column ("Bob Cringely has died", "Apple Pass
+      Designer"), which makes the miss list noise. The interest profile is reused
+      so the list is about the topics the reader actually follows.
+    """
+    pool: list[dict[str, Any]] = []
+    for key, title_field, url_field, signal_field, label in _SIGNAL_KEYS:
+        rows = [r for r in (raw.get(key) or []) if isinstance(r, dict)]
+        def rank(entry: dict[str, Any]) -> float:
+            value = entry.get(signal_field)
+            if isinstance(value, (int, float)):
+                return -float(value)
+            return 0.0
+        for position, entry in enumerate(sorted(rows, key=rank)[:top_per_source], start=1):
+            url = str(entry.get(url_field) or "").strip()
+            if not url:
+                continue
+            if brief_mod is not None and not _on_topic(entry, title_field, brief_mod):
+                continue
+            pool.append(
+                {
+                    "source": label,
+                    "title": str(entry.get(title_field) or url),
+                    "url": url,
+                    "signal": f"{label} {signal_field}={entry.get(signal_field)}",
+                    "rank_in_source": position,
+                }
+            )
+    for bucket in ("tweets_recent", "tweets_evergreen"):
+        rows = [r for r in (raw.get(bucket) or []) if isinstance(r, dict)]
+        for position, entry in enumerate(
+            sorted(rows, key=lambda e: -(e.get("likes") or 0))[:top_per_source], start=1
+        ):
+            url = str(entry.get("url") or "").strip()
+            if not url:
+                continue
+            if bucket == "tweets_evergreen" and str(entry.get("date") or "") != target_date:
+                continue
+            text = str(entry.get("text") or "").strip()
+            if len(text) < 40 or text.lower().startswith(("excited http", "http")):
+                continue
+            if brief_mod is not None and not _on_topic(entry, "text", brief_mod):
+                continue
+            pool.append(
+                {
+                    "source": "X",
+                    "title": text[:90],
+                    "url": url,
+                    "signal": f"X likes={entry.get('likes')}",
+                    "rank_in_source": position,
+                }
+            )
+    return pool
+
+
+def _on_topic(entry: dict[str, Any], title_field: str, brief_mod: Any) -> bool:
+    """Reuse the interest profile so the miss list is about *your* topics."""
+    text = " ".join(
+        str(entry.get(key) or "")
+        for key in (title_field, "description", "summary", "text")
+        if entry.get(key)
+    )
+    if not text.strip():
+        return False
+    try:
+        # 宽松口径：候选池宁可多报，精度交给编辑判断。
+        return bool(brief_mod.topic_hits_loose(text, brief_mod.load_interests()))
+    except Exception:  # noqa: BLE001 - 过滤失败时退回「不筛」，宁可多报也不漏报
+        return True
+
+
 def run_all(
     specs: list[Any],
     *,

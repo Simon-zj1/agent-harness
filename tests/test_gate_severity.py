@@ -243,5 +243,72 @@ class ReleaseGateTests(unittest.TestCase):
         self.assertIn("来自其它日期的抓取", result.stdout)
 
 
+class CoverageTests(unittest.TestCase):
+    """覆盖度：报告「今天最热的那批里，哪些没写进去」。
+
+    两个坑都在第一版里踩过，这里都锁住：跨天的常青帖不算今天的信号；只报不拦。
+    """
+
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self._tmp.name)
+
+    def tearDown(self) -> None:
+        self._tmp.cleanup()
+
+    def _write(self, raw: dict, *, cited_url: str | None) -> tuple[Path, Path]:
+        raw_path = self.root / "raw.json"
+        raw_path.write_text(json.dumps(raw), encoding="utf-8")
+        refs = [{"id": 1, "title": "cited", "url": cited_url}] if cited_url else []
+        content = {
+            "date": "2026-01-02",
+            "title": {"zh": "标题", "en": "title"},
+            "summary": {"zh": "总览", "en": "overview"},
+            "notes": {"zh": "口径", "en": "scope"},
+            "sections": [
+                {"id": "insights", "groups": [{"id": "g", "title": {"zh": "组", "en": "Group"},
+                                              "items": [_item("条目", [1])]}]},
+                {"id": "github", "items": [_item("repo", [1])]},
+            ],
+            "references": refs,
+        }
+        content_path = self.root / "content.json"
+        content_path.write_text(json.dumps(content, ensure_ascii=False), encoding="utf-8")
+        return content_path, raw_path
+
+    def test_uncited_top_signal_item_is_reported(self) -> None:
+        content_path, raw_path = self._write(
+            {"hn": [{"title": "hot story", "url": "https://example.com/hot", "points": 900}]},
+            cited_url=None,
+        )
+        result = validators.daily_trends_coverage(content_path, raw_path)
+        self.assertTrue(result["ok"], "覆盖度只报警，不拦发布")
+        self.assertEqual(result["metrics"]["top3_missed"], 1)
+        self.assertEqual(result["warnings"][0]["title"], "hot story")
+
+    def test_cited_top_signal_item_is_not_reported(self) -> None:
+        content_path, raw_path = self._write(
+            {"hn": [{"title": "hot story", "url": "https://example.com/hot", "points": 900}]},
+            cited_url="https://example.com/hot",
+        )
+        result = validators.daily_trends_coverage(content_path, raw_path)
+        self.assertEqual(result["metrics"]["top3_missed"], 0)
+        self.assertEqual(result["warnings"], [])
+
+    def test_evergreen_tweets_from_other_days_are_not_counted(self) -> None:
+        """31k 赞的跨天常青帖曾被连着四天报成「今天的漏报」。"""
+        content_path, raw_path = self._write(
+            {
+                "tweets_evergreen": [
+                    {"url": "https://x.com/a/1", "date": "2025-12-31", "likes": 31000,
+                     "text": "一个很长但属于别的日期的帖子内容，用来验证跨天过滤是否生效"}
+                ]
+            },
+            cited_url=None,
+        )
+        result = validators.daily_trends_coverage(content_path, raw_path)
+        self.assertEqual(result["metrics"]["pool"], 0)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -142,3 +142,9 @@ args = { path = "{site_repo}/sitemap.xml" }
 [[validators]]
 name = "daily_trends_index"
 args = { path = "{tools_dir}/site/trends/index.html", expected_date = "{date}" }
+
+# 覆盖度：当天各来源的高信号条目里，有多少没写进去（只告警，不改发布）。
+[[validators]]
+name = "daily_trends_coverage"
+args = { content_path = "{run_dir}/content.json", raw_path = "{tools_dir}/data/raw/{date}.json", tools_dir = "{tools_dir}" }
+required = false
