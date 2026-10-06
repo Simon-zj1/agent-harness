@@ -19,11 +19,33 @@ cd /path/to/agent-harness
 ./agent report <run_id>                                            # 单次运行详情
 ./agent verify corpus                                              # 从真实抓取构建标注语料
 ./agent verify eval                                                # 测量验收闸门自身的漏检率
+./agent verify probes                                              # 对抗探针（schema/dedup/refund/merge）
+./agent verify content                                             # 逐日内容债：区分「闸门过期」与真缺陷
+./agent verify selection --sample 100                              # 生成待标注清单（gold 列留空）
 ```
 
 `verify corpus` / `verify eval` 依赖仓库外的 `daily-trends` 抓取数据。默认取本仓库
 同级的 `../daily-trends/data`，也可以用 `DAILY_TRENDS_DATA_DIR` 显式覆盖；`doctor`
 会检查任务声明的外部读取路径是否存在。
+
+## 现状与差距（2026-10-06 实测，不是目标）
+
+- **发布是单一写入者**：站点由 `blog/tools/deploy.sh`（Hexo）生成并发布，本仓库
+  `[publish] default_enabled = false`。harness 负责生成、验收与诊断，不直接 push 站点
+  仓库——两个写入者曾在 `tech/papers/rrsi-harness-rsi` 上删掉 792 行。
+- **内容债 10/16 天干净**（`./agent verify content`）。剩下 6 天是各自不同的问题，
+  不再混成一个数字。
+- **契约漂移曾是最严重的问题**：产线在 16 天里换过三种正文形状
+  （`summary+comment` → `fields[]` → `prose`）并新增 `papers` 章节，而闸门只认第一种，
+  于是"3/16 干净"里有 9 天其实是**闸门过期**而非内容缺陷。现在三种形状与三个章节都写在
+  `harness/content_schema.py`；再出现新形状，闸门回答 CANNOT_VERIFY（不是 PASS）并指名
+  是哪个章节/条目。**改内容形状时先改契约，再改产线。**
+- **一条真实的当前缺陷**：2026-10-05 的稿子引用了 8 篇 arXiv 论文，而当天 arXiv 抓取
+  为 0 条——引用来自 10-04 的抓取。`daily_trends_verifiable` 判失败（可核验率 0.79）。
+- **重复检测按栏目区分**：同栏目 + 同源 + 标题重合 → 硬重复，拦截发布；跨栏目的重复
+  （综述 vs 它引用的仓库）只报数不判，交给人工或灰区模型判定。
+- **「选得准不准」还没有数据**：`verify selection` 能生成 100 条均衡候选清单，但
+  `gold` 列必须由人填；没有标注时脚本拒绝给数字。
 
 ## 结构
 
@@ -35,8 +57,12 @@ harness/                  内核
   registry.py tools/      Tool 接口 + 权限模型（可写路径、命令白名单、网络、执行器）
   memory.py               文件优先记忆 + SQLite FTS5 索引（缺失时自动降级 LIKE）
   decisions.py            类型化决策：PASS / FAIL / CANNOT_VERIFY / ABSTAIN + 失败分类 + 证据
-  validators.py           验收标准（结构 / 引用 / 防编造可核验率）
+  content_schema.py       内容契约：prose / fields / summary 三种正文形状 + 已声明章节
+  dedup.py                重复判定：字符串可证的硬重复 + 需要判断的灰区
+  validators.py           验收标准（结构 / 引用 / 防编造可核验率 / 重复 / 生成物漂移）
   verification_eval.py    测量验收闸门自身：标注语料 + 多 matcher 对照 + 漏检率/误杀率
+  validator_probes.py     对抗探针：把「看起来没问题」的载荷喂给闸门
+  selection_eval.py       「选得准不准」：候选清单 + 人工标注 + 查准/查全
   providers/              模型适配层（DeepSeek 默认；本地 OpenAI 兼容端点预留）
   loop.py                 实验性自研 agent loop（工具调用 + 预算 + 停止条件；不用于 daily-trends 主路径）
   experiment.py           多策略对比实验台

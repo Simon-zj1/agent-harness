@@ -348,8 +348,177 @@ def merge_probes() -> list[Probe]:
     ]
 
 
+def _article(*, sections=None, notes=("口径", "scope")) -> dict[str, Any]:
+    def item(title: str) -> dict:
+        return {
+            "title": {"zh": title, "en": title},
+            "summary": {"zh": "摘要", "en": "summary"},
+            "comment": {"zh": "点评", "en": "comment"},
+            "sources": [1],
+        }
+
+    return {
+        "date": "2026-01-01",
+        "title": {"zh": "标题", "en": "title"},
+        "summary": {"zh": "总览", "en": "overview"},
+        "notes": {"zh": notes[0], "en": notes[1]},
+        "sections": sections
+        or [
+            {
+                "id": "insights",
+                "groups": [
+                    {"id": "g", "title": {"zh": "组", "en": "Group"}, "items": [item("选中")]}
+                ],
+            },
+            {"id": "github", "items": [item("repo")]},
+        ],
+        "references": [{"id": 1, "title": "src", "url": "https://example.com/a"}],
+    }
+
+
+def schema_probes() -> list[Probe]:
+    """Probes for the article contract (`daily_trends_structure`).
+
+    The invariant that matters most here is the one whose absence cost nine
+    days: a shape the gate does not recognise must not be reported as passing.
+    The probes below are the shapes that *look* like a valid article.
+    """
+    unknown_section = _article()
+    unknown_section["sections"].append(
+        {"id": "podcasts", "items": [{"title": {"zh": "播客", "en": "podcast"}, "prose": {"zh": "x", "en": "y"}, "sources": [1]}]}
+    )
+    unknown_variant = _article()
+    unknown_variant["sections"][0]["groups"][0]["items"] = [
+        {"title": {"zh": "标题", "en": "title"}, "blurb": {"zh": "x", "en": "y"}, "sources": [1]}
+    ]
+    over_cap = _article()
+    over_cap["sections"][1]["items"] = [
+        {
+            "title": {"zh": f"repo{i}", "en": f"repo{i}"},
+            "prose": {"zh": "x", "en": "y"},
+            "sources": [1],
+        }
+        for i in range(11)
+    ]
+    missing_en = _article()
+    missing_en["sections"][1]["items"][0]["summary"] = {"zh": "只有中文"}
+    legacy = _article()
+    legacy["sections"][1]["items"][0] = {
+        "title": {"zh": "旧形状", "en": "legacy"},
+        "fields": [
+            {"label": {"zh": "摘要", "en": "Summary"}, "value": {"zh": "a", "en": "b"}}
+        ],
+        "sources": [1],
+    }
+
+    return [
+        Probe(
+            "schema-known-shape-passes",
+            "daily_trends_structure",
+            _article(),
+            EXPECT_PASS,
+            "the shape the producer actually emits must validate",
+        ),
+        Probe(
+            "schema-legacy-fields-passes",
+            "daily_trends_structure",
+            legacy,
+            EXPECT_PASS,
+            "v2 (fields) is still a supported renderer shape",
+        ),
+        Probe(
+            "schema-undeclared-section",
+            "daily_trends_structure",
+            unknown_section,
+            EXPECT_NOT_PASS,
+            "a new section the gate does not know is a contract change, not a pass",
+        ),
+        Probe(
+            "schema-unknown-item-variant",
+            "daily_trends_structure",
+            unknown_variant,
+            EXPECT_NOT_PASS,
+            "an item body the renderer cannot render must not slip through",
+        ),
+        Probe(
+            "schema-over-cap-section",
+            "daily_trends_structure",
+            over_cap,
+            EXPECT_NOT_PASS,
+            "11 repos is over the declared cap of 10",
+        ),
+        Probe(
+            "schema-missing-english",
+            "daily_trends_structure",
+            missing_en,
+            EXPECT_NOT_PASS,
+            "a one-language item is not bilingual",
+        ),
+    ]
+
+
+def duplicate_probes() -> list[Probe]:
+    """Probes for `daily_trends_no_duplicates`."""
+    pair = _article()
+    pair["sections"][0]["groups"][0]["items"] = [
+        {
+            "title": {"zh": "RoboECC：边缘-云协同的机器人计算框架", "en": "RoboECC framework"},
+            "prose": {"zh": "正文", "en": "body"},
+            "sources": [1],
+        },
+        {
+            "title": {"zh": "RoboECC：机器人边缘-云协同计算代码", "en": "RoboECC code"},
+            "prose": {"zh": "正文", "en": "body"},
+            "sources": [1],
+        },
+    ]
+    cross = _article()
+    cross["sections"][0]["groups"][0]["items"] = [
+        {
+            "title": {
+                "zh": "世界模型代码开源潮：客体永久性官方实现与 WorldinWorld",
+                "en": "World model open-source wave: object permanence and WorldinWorld",
+            },
+            "prose": {"zh": "正文", "en": "body"},
+            "sources": [1],
+        }
+    ]
+    cross["sections"][1]["items"] = [
+        {
+            "title": {
+                "zh": "hokindeng/object-permanence — 世界模型客体永久性官方代码",
+                "en": "hokindeng/object-permanence",
+            },
+            "prose": {"zh": "正文", "en": "body"},
+            "sources": [1],
+        }
+    ]
+
+    return [
+        Probe(
+            "dedup-same-section-repeat",
+            "daily_trends_no_duplicates",
+            pair,
+            EXPECT_NOT_PASS,
+            "the same story twice in one group is a hard duplicate",
+        ),
+        Probe(
+            "dedup-cross-section-roundup",
+            "daily_trends_no_duplicates",
+            cross,
+            EXPECT_PASS,
+            "a roundup and one of the repos it cites is a judgement call, not an auto-drop",
+        ),
+    ]
+
+
 def probe_registry() -> dict[str, Callable[[], list[Probe]]]:
-    return {"refund": refund_probes, "merge": merge_probes}
+    return {
+        "refund": refund_probes,
+        "merge": merge_probes,
+        "schema": schema_probes,
+        "dedup": duplicate_probes,
+    }
 
 
 def all_probes(name: str | None = None) -> list[Probe]:

@@ -15,6 +15,7 @@ from . import (
     launchd,
     memory,
     paths,
+    selection_eval,
     taskspec,
     validator_probes,
     verification_eval,
@@ -236,6 +237,23 @@ def build_parser() -> argparse.ArgumentParser:
         "--days", action="append", default=None, help="YYYY-MM-DD (repeatable)"
     )
     v_content.set_defaults(_handler=cmd_verify_content)
+    v_selection = ver_sub.add_parser(
+        "selection",
+        help="build a labelled sheet of what the pipeline chose, or score a filled one",
+    )
+    v_selection.add_argument(
+        "--days",
+        action="append",
+        default=None,
+        help="YYYY-MM-DD (repeatable); default is every day with a capture",
+    )
+    v_selection.add_argument("--sample", type=int, default=100, help="rows in the sheet")
+    v_selection.add_argument("--out", help="directory for the sheet")
+    v_selection.add_argument(
+        "--score",
+        help="score this already-labelled sheet (jsonl or csv) instead of building one",
+    )
+    v_selection.set_defaults(_handler=cmd_verify_selection)
     return parser
 
 
@@ -750,6 +768,73 @@ def cmd_verify_content(args: argparse.Namespace) -> int:
         )
     log.info(f"干净 {report['clean']}/{report['days']} 天")
     log.info(f"report: {outdir / 'report.md'}")
+    return EXIT_OK
+
+
+def cmd_verify_selection(args: argparse.Namespace) -> int:
+    """Build a labelled sheet, or score one a human has filled in."""
+    log = console()
+
+    if args.score:
+        sheet = Path(args.score)
+        rows = selection_eval.load_sheet(sheet)
+        report = selection_eval.score_sheet(rows)
+        outdir = sheet.parent
+        stamp = dt.datetime.now().strftime("%Y%m%d-%H%M%S")
+        (outdir / f"score-{stamp}.md").write_text(
+            selection_eval.markdown(report), encoding="utf-8"
+        )
+        (outdir / f"score-{stamp}.json").write_text(
+            json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8"
+        )
+        if report["labelled"] == 0:
+            log.error(
+                "0 条人工标注：评分需要先把 sheet 的 gold 列填成 select/reject/either。"
+                "没有标注就没有证据，这里不会给数字。"
+            )
+            log.info(f"待标注：{sheet}（{report['sheet_rows']} 行）")
+            return EXIT_FAIL
+        pct = lambda value: "—" if value is None else f"{value * 100:.1f}%"  # noqa: E731
+        log.info(
+            f"标注 {report['labelled']} 条（两可 {report['either']}，未标注 {report['unlabelled']}）"
+        )
+        log.info(
+            f"查准率 {pct(report['precision'])}  查全率 {pct(report['recall'])}  "
+            f"准确率 {pct(report['accuracy'])}"
+        )
+        log.info(
+            f"  TP={report['counts']['tp']} FP={report['counts']['fp']} "
+            f"FN={report['counts']['fn']} TN={report['counts']['tn']}"
+        )
+        if report["labelled"] < 30:
+            log.info("提示：标注少于 30 条时这些比率只是方向，不要当结论。")
+        log.info(f"report: {outdir / f'score-{stamp}.md'}")
+        return EXIT_OK
+
+    days = args.days or selection_eval.available_days()
+    if not days:
+        log.error("no day has both a capture and a composed article")
+        return EXIT_FAIL
+    rows = selection_eval.build_sheet(days, sample=args.sample)
+    if not rows:
+        log.error("no candidates found; nothing to label")
+        return EXIT_FAIL
+    written = selection_eval.write_sheet(rows, Path(args.out) if args.out else None)
+    buckets: dict[str, int] = {}
+    kinds: dict[str, int] = {}
+    for row in rows:
+        buckets[row.bucket] = buckets.get(row.bucket, 0) + 1
+        kinds[row.kind] = kinds.get(row.kind, 0) + 1
+    log.info(f"sheet: {len(rows)} 行，覆盖 {len(days)} 天")
+    log.info(f"  bucket: {buckets}")
+    log.info(f"  kind:   {kinds}")
+    log.info(f"  {written['csv']}   ← 用 Excel 填 gold 列（select / reject / either）")
+    log.info(f"  {written['jsonl']} ← 或者直接改 jsonl")
+    log.info(
+        "填完后评分：./agent verify selection --score "
+        f"{written['csv']}"
+    )
+    log.info("draft 列是机器猜测，只作参考；评分只认 gold 列。")
     return EXIT_OK
 
 

@@ -416,12 +416,21 @@ def content_debt(days: Iterable[str], *, root: Path | None = None) -> dict[str, 
         structure = validators_mod.daily_trends_structure(content)
         references = validators_mod.daily_trends_references(content)
         verifiable = validators_mod.daily_trends_verifiable(content, raw)
+        duplicates = validators_mod.daily_trends_no_duplicates(content)
+        structure_metrics = structure.get("metrics") or {}
+        duplicate_metrics = duplicates.get("metrics") or {}
+        # `cannot_verify` on structure is the signature of the gate being stale
+        # about the article's shape, which is a different problem from content
+        # that actually violates the contract. Conflating the two is what made
+        # this report say "3/16 clean" for nine days.
+        gate_stale = structure.get("decision") == "cannot_verify"
         blockers = [
             name
             for name, result in (
                 ("structure", structure),
                 ("references", references),
                 ("verifiable", verifiable),
+                ("duplicates", duplicates),
             )
             if not result.get("ok")
         ]
@@ -429,8 +438,16 @@ def content_debt(days: Iterable[str], *, root: Path | None = None) -> dict[str, 
             {
                 "day": day,
                 "structure": structure.get("ok"),
+                "structure_decision": structure.get("decision"),
+                "gate_stale": gate_stale,
+                "shape": structure_metrics.get("shape"),
+                "body_variants": structure_metrics.get("body_variants"),
+                "unknown_sections": structure_metrics.get("unknown_sections"),
                 "references": references.get("ok"),
                 "verifiable": verifiable.get("ok"),
+                "duplicates": duplicates.get("ok"),
+                "duplicate_pairs": duplicate_metrics.get("duplicate_pairs"),
+                "borderline_pairs": duplicate_metrics.get("borderline_pairs"),
                 "verifiable_ratio": (verifiable.get("metrics") or {}).get(
                     "verifiable_ratio"
                 ),
@@ -442,11 +459,14 @@ def content_debt(days: Iterable[str], *, root: Path | None = None) -> dict[str, 
             }
         )
     dirty = [row for row in rows if not row["clean"]]
+    stale = [row for row in rows if row["gate_stale"]]
     return {
         "generated_at": dt.datetime.now().astimezone().isoformat(timespec="seconds"),
         "days": len(rows),
         "clean": len(rows) - len(dirty),
         "dirty": len(dirty),
+        "gate_stale_days": len(stale),
+        "gate_stale": [row["day"] for row in stale],
         "rows": rows,
     }
 
@@ -458,16 +478,27 @@ def content_debt_markdown(report: dict[str, Any]) -> str:
         f"- 检查 {report['days']} 天：{report['clean']} 天通过全部内容闸门，{report['dirty']} 天未通过",
         f"- 生成时间：{report['generated_at']}",
         "",
-        "| 日期 | 结构 | 引用 | 可核验 | 可核验率 | 无法核验 | 失败 | 孤儿引用 | 卡在哪 |",
-        "| --- | --- | --- | --- | --- | --- | --- | --- | --- |",
+        f"- 其中 {report.get('gate_stale_days', 0)} 天的结构闸门**不认识内容形状**"
+        "（契约变化、闸门滞后），不是内容缺陷",
+        "",
+        "| 日期 | 形状 | 结构 | 引用 | 可核验 | 可核验率 | 重复 | 灰区 | 孤儿引用 | 卡在哪 |",
+        "| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |",
     ]
     for row in report["rows"]:
         mark = lambda ok: "ok" if ok else "**FAIL**"  # noqa: E731
         ratio = row["verifiable_ratio"]
+        variants = row.get("body_variants") or {}
+        shape = (
+            "未声明"
+            if row.get("gate_stale")
+            else ",".join(f"{k}:{v}" for k, v in variants.items()) or "—"
+        )
         lines.append(
-            f"| {row['day']} | {mark(row['structure'])} | {mark(row['references'])} | "
+            f"| {row['day']} | {shape} | {mark(row['structure'])} | {mark(row['references'])} | "
             f"{mark(row['verifiable'])} | {'—' if ratio is None else f'{ratio:.2f}'} | "
-            f"{row['cannot_verify']} | {row['fail']} | {row['orphan_references']} | "
+            f"{row.get('duplicate_pairs') if row.get('duplicate_pairs') is not None else '—'} | "
+            f"{row.get('borderline_pairs') if row.get('borderline_pairs') is not None else '—'} | "
+            f"{row['orphan_references']} | "
             f"{', '.join(row['blockers']) or '—'} |"
         )
     lines += [
@@ -475,6 +506,11 @@ def content_debt_markdown(report: dict[str, Any]) -> str:
         "## 说明",
         "",
         "- 这张表只做诊断，不改已发布内容。是否回修历史稿件是编辑决定，不是工程决定。",
+        "- `形状` 是闸门认出的内容形态（prose / fields / summary_comment）。显示「未声明」",
+        "  表示产线换了形状而 `harness/content_schema.py` 还不知道它——那是契约漂移，",
+        "  应当去补契约或改产线，而不是去修历史稿件。",
+        "- `重复` 是同一篇里同一件事出现两次的硬重复（字符串可证）；`灰区` 是需要人工/模型",
+        "  判断的相似对，闸门不做模型调用，所以只报数不判。",
         "- 可核验率下降有两种原因，需要分开看：引用确实不在当天抓取里，或当天的抓取文件",
         "  被后续运行覆盖过（`fetch` 曾经在 dry-run 下也执行）。后者属于可复现性事故。",
         "",

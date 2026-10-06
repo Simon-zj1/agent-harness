@@ -6,7 +6,8 @@
 
 - `agent` — 唯一入口（`./agent run|status|report|runs|annotate|backup|memory|experiment|verify|launchd|doctor`）
 - `harness/` — 内核：runtime（幂等/锁/台账）、tools（权限与审计）、memory（文件优先）、
-  decisions（类型化决策）、validators（验收标准）、verification_eval（测量闸门自身）、
+  decisions（类型化决策）、content_schema（内容契约）、dedup（重复判定）、validators（验收标准）、
+  verification_eval（测量闸门自身）、selection_eval（「选得准不准」的人工标注评测）、
   validator_probes（校验器不变式的对抗探针）、
   providers（模型适配）、loop（自研循环）、experiment（实验台）
 - `tasks/<name>/task.toml` — 任务声明（步骤、工具白名单、可写路径、校验、预算）
@@ -23,6 +24,11 @@
 6. 步骤里的渲染/预览写入必须落在 `{run_dir}` 内。补丁第三方模块的常量时要检查它的派生量
    （`X = A / "b"` 这种在 import 期算出来的，改 `A` 不会改 `X`），否则 dry-run 会写穿到真实仓库。
 7. 测试不要读会被运行改写的现场文件（`data/raw/` 会被 `fetch` 覆盖）；用 `tests/fixtures/` 下的冻结夹具。
+8. **内容形状变化必须先改 `harness/content_schema.py`**：产线换了正文变体或新增章节，而契约没跟上时，
+   闸门会回答 CANNOT_VERIFY（指名章节/条目），不会静默通过。2026-09-27 之后九天就是这么丢的。
+9. 重复判定按栏目区分：同栏目 + 同源 + 标题重合是硬重复（拦发布）；跨栏目的重合是判断题，
+   只记录不自动删（综述与它引用的仓库是两件事）。
+10. 「选得准不准」只能在有人工标注时给数字：`verify selection` 的 `gold` 列不许由脚本代填。
 
 ## 验证
 
@@ -35,6 +41,7 @@ python3 -m unittest discover -t . -s tests -v
 ./agent verify eval
 ./agent verify probes
 ./agent verify content
+./agent verify selection --sample 100      # 生成待标注清单；填完 gold 后再 --score
 ```
 
 `-t .` 是必需的：测试用相对导入（`from .helpers import ...`），不指定顶层目录会直接

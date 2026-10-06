@@ -116,6 +116,12 @@ args = { path = "{run_dir}/content.json" }
 name = "daily_trends_verifiable"
 args = { content_path = "{run_dir}/content.json", raw_path = "{tools_dir}/data/raw/{date}.json" }
 
+# 同一篇里同一件事不能出现两次：硬重复（字符串可证）拦截，灰区相似只报数不判
+# （闸门不调模型；要人工/模型判的话看 runs/<id>/dedup.json）。
+[[validators]]
+name = "daily_trends_no_duplicates"
+args = { path = "{run_dir}/content.json" }
+
 # 生成物漂移闸门：站点仓库里的 sitemap 必须始终可解析、无重复 URL、不累积空行。
 [[validators]]
 name = "sitemap_sane"

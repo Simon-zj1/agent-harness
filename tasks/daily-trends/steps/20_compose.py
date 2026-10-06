@@ -7,7 +7,7 @@ import json
 import re
 from pathlib import Path
 
-from harness import providers, stepctx, validators
+from harness import content_schema, dedup, providers, stepctx, validators
 
 MAX_CHARS_FULL = 220_000
 MAX_CHARS_PREFILTERED = 60_000
@@ -136,6 +136,11 @@ def _llm_chunked(ctx, *, raw_path: Path, content_path: Path) -> int:
     )
     notes += merge_notes
 
+    content, dedup_notes, dedup_metrics = _dedupe(
+        ctx, content, judge=_dedup_judge(ctx, provider)
+    )
+    notes += dedup_notes
+
     content_path.parent.mkdir(parents=True, exist_ok=True)
     content_path.write_text(
         json.dumps(content, ensure_ascii=False, indent=2), encoding="utf-8"
@@ -152,6 +157,7 @@ def _llm_chunked(ctx, *, raw_path: Path, content_path: Path) -> int:
     if cost_usd is not None:
         metrics["cost_usd"] = cost_usd
     metrics.update(_metrics(content_path, raw_path))
+    metrics.update(dedup_metrics)
     budget_problem = _run_budget_problem(ctx, cost_usd)
     if budget_problem:
         return stepctx.fail(ctx, budget_problem, metrics=metrics)
@@ -663,6 +669,88 @@ def _run_budget_problem(ctx, cost_usd) -> str:
             f"${float(limit):.2f}；未写入正式内容存储"
         )
     return ""
+
+
+def _dedup_judge(ctx, provider):
+    """A model judge for grey-band pairs only.
+
+    Clear duplicates are decided by strings; the model is asked only about the
+    pairs a string rule cannot settle ("this paper" vs "its code repo"). The
+    judge is capped per run and answers in strict JSON so a chatty answer cannot
+    be mistaken for a decision.
+    """
+
+    def judge(left, right):
+        prompt = (
+            "判断下面两条是否是同一件事（同一条新闻 / 同一个事件 / 同一个项目的重复条目）。\n"
+            "只输出 JSON：{\"same_event\": true} 或 {\"same_event\": false}，不要解释。\n\n"
+            f"A: {left.title_zh or left.title_en}\n   摘要: {(left.body_zh or left.body_en)[:300]}\n\n"
+            f"B: {right.title_zh or right.title_en}\n   摘要: {(right.body_zh or right.body_en)[:300]}"
+        )
+        try:
+            response = provider.chat(
+                [
+                    {"role": "system", "content": "你只做同一性判断，输出严格 JSON。"},
+                    {"role": "user", "content": prompt},
+                ],
+                max_tokens=32,
+            )
+        except Exception as exc:  # noqa: BLE001 - a judge failure must not kill compose
+            ctx.logger.warning("dedup judge failed: %s", exc)
+            return dedup.Decision.CANNOT_VERIFY
+        judge.tokens_in += response.tokens_in
+        judge.tokens_out += response.tokens_out
+        parsed = _parse_json(response.text or "")
+        if not parsed or "same_event" not in parsed:
+            return dedup.Decision.CANNOT_VERIFY
+        return dedup.Decision.PASS if parsed["same_event"] else dedup.Decision.FAIL
+
+    judge.tokens_in = 0
+    judge.tokens_out = 0
+    return judge
+
+
+def _dedupe(ctx, content: dict, *, judge=None, max_judge_calls: int = 8):
+    """Drop duplicates so one story does not appear twice in one article.
+
+    Returns (content, notes, metrics). Grey-band pairs a model did not settle
+    are kept but counted, so the uncertainty shows up in the run metrics rather
+    than being rounded to either answer.
+    """
+    view = content_schema.normalize(content)
+    candidates = dedup.build_candidates(
+        view, reference_urls=dedup.reference_url_map(view.references)
+    )
+    plan = dedup.compare(candidates)
+    outcome = dedup.resolve(plan, judge=judge, max_judge_calls=max_judge_calls)
+    dropped = content_schema.drop_locations(content, outcome.dropped_locations)
+
+    details = outcome.to_dict()
+    details["pairs"] = len(plan.pairs)
+    details["dropped_count"] = dropped
+    report_path = ctx.run_dir / "dedup.json"
+    report_path.write_text(json.dumps(details, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    notes: list[str] = []
+    if dropped:
+        notes.append(f"去重丢弃 {dropped} 条与本篇其他条目重复的内容")
+    if outcome.judge_calls:
+        notes.append(f"灰区判定 {outcome.judge_calls} 次（模型）")
+    if outcome.unjudged:
+        notes.append(f"{len(outcome.unjudged)} 对灰区相似未判定（见 dedup.json）")
+
+    metrics = {
+        "dedup_dropped": dropped,
+        "dedup_pairs": len(plan.pairs),
+        "dedup_clear": len(plan.duplicates),
+        "dedup_grey": len(plan.borderline),
+        "dedup_judged": outcome.judge_calls,
+        "dedup_unjudged": len(outcome.unjudged),
+    }
+    if judge is not None and getattr(judge, "tokens_in", 0) + getattr(judge, "tokens_out", 0):
+        metrics["tokens_in"] = int(getattr(judge, "tokens_in", 0))
+        metrics["tokens_out"] = int(getattr(judge, "tokens_out", 0))
+    return content, notes, metrics
 
 
 def _accept_content(ctx, content: dict) -> None:

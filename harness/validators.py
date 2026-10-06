@@ -22,7 +22,7 @@ from .decisions import (
     classify_url,
     combine,
 )
-from . import refund_guard
+from . import content_schema, dedup, refund_guard
 from .errors import ValidationFailed
 
 Validator = Callable[..., dict[str, Any]]
@@ -117,27 +117,61 @@ def load_content(path: str | Path) -> dict[str, Any]:
 def daily_trends_structure(
     path: str | Path,
     *,
-    max_insights: int = 20,
-    max_repos: int = 20,
+    max_insights: int | None = None,
+    max_repos: int | None = None,
     name: str = "daily_trends_structure",
 ) -> dict[str, Any]:
-    """Check the article contract the published pages depend on."""
+    """Check the article contract the published pages depend on.
+
+    The contract itself lives in `harness/content_schema.py` and covers every
+    body variant the renderer supports (prose / fields / summary+comment) plus
+    the declared section set. An **undeclared shape is CANNOT_VERIFY, not
+    PASS**: that is the fix for the nine days when the producer silently
+    changed shape and this gate kept answering as if it understood the file.
+    """
     try:
         content = load_content(path)
     except ValidationFailed as exc:
         return _result(name, False, str(exc))
-    failures, metrics = check_structure(
-        content, max_insights=max_insights, max_repos=max_repos
-    )
+
+    report = content_schema.check(content)
+    metrics = dict(report.metrics)
+    failures = list(report.failures)
+    if max_insights is not None and metrics["insights"] > max_insights:
+        failures.append(
+            {"issue": f"insights has {metrics['insights']} items (max {max_insights})"}
+        )
+    if max_repos is not None and metrics["repos"] > max_repos:
+        failures.append(
+            {"issue": f"github has {metrics['repos']} items (max {max_repos})"}
+        )
+
+    if report.unknown_shape:
+        return _result(
+            name,
+            False,
+            "; ".join(report.reasons),
+            decision=Decision.CANNOT_VERIFY,
+            failure_class=FailureClass.UNKNOWN_VARIANT,
+            remediation=(
+                "The gate does not know this shape, so it cannot claim the article "
+                "is fine. Either declare the new section/variant in "
+                "harness/content_schema.py (this is a contract change and should be "
+                "deliberate) or regenerate the article in a supported shape."
+            ),
+            failures=[{"issue": reason} for reason in report.reasons],
+            metrics=metrics,
+        )
+
     ok = not failures
     return _result(
         name,
         ok,
         "structure ok" if ok else f"{len(failures)} structural problem(s)",
         remediation=(
-            "The published pages depend on this shape. Re-run compose, or fix the "
-            "offending items: every item needs zh+en title/summary/comment and at "
-            "least one source."
+            "Every item needs a bilingual body in one of the supported variants "
+            "(prose / fields / summary+comment), a bilingual title and at least "
+            "one source."
         )
         if not ok
         else None,
@@ -149,76 +183,120 @@ def daily_trends_structure(
 def check_structure(
     content: dict[str, Any],
     *,
-    max_insights: int = 20,
-    max_repos: int = 20,
+    max_insights: int | None = None,
+    max_repos: int | None = None,
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
-    """In-memory version of the structural contract (used for self-repair)."""
-    failures: list[dict[str, Any]] = []
+    """In-memory version used by compose for its self-repair round."""
+    report = content_schema.check(content)
+    failures = list(report.failures)
+    failures += [{"issue": reason} for reason in report.reasons]
+    metrics = dict(report.metrics)
+    if max_insights is not None and metrics["insights"] > max_insights:
+        failures.append(
+            {"issue": f"insights has {metrics['insights']} items (max {max_insights})"}
+        )
+    if max_repos is not None and metrics["repos"] > max_repos:
+        failures.append(
+            {"issue": f"github has {metrics['repos']} items (max {max_repos})"}
+        )
+    return failures, metrics
 
-    def require(condition: bool, message: str) -> None:
-        if not condition:
-            failures.append({"issue": message})
 
-    require(bool(content.get("date")), "missing date")
-    for key in ("title", "summary", "notes"):
-        block = content.get(key) or {}
-        for lang in ("zh", "en"):
-            require(bool(str(block.get(lang, "")).strip()), f"{key}.{lang} is empty")
+@validator("daily_trends_no_duplicates")
+def daily_trends_no_duplicates(
+    path: str | Path,
+    *,
+    borderline: str = "warn",
+    name: str = "daily_trends_no_duplicates",
+) -> dict[str, Any]:
+    """The same story must not appear twice in one article.
 
-    sections = content.get("sections") or []
-    require(len(sections) >= 2, f"expected 2 sections, found {len(sections)}")
+    Clear duplicates (score >= 0.86) fail: they are a real editorial defect the
+    strings can prove. Grey-band pairs (0.60-0.86) need a judgement, and this
+    gate has no model, so by default they are *reported, not judged* — the
+    count and examples go into metrics and the run detail. Pass
+    `borderline = "cannot_verify"` to make unjudged pairs block instead.
+    """
+    try:
+        content = load_content(path)
+    except ValidationFailed as exc:
+        return _result(name, False, str(exc))
 
-    insights_count = 0
-    repos_count = 0
-    item_issues = 0
-    for section in sections:
-        sid = section.get("id")
-        items: list[dict[str, Any]] = []
-        for group in section.get("groups") or []:
-            items.extend(group.get("items") or [])
-        items.extend(section.get("items") or [])
-        if sid == "insights":
-            insights_count = len(items)
-            require(
-                insights_count <= max_insights,
-                f"insights has {insights_count} items (max {max_insights})",
-            )
-            groups = section.get("groups") or []
-            require(bool(groups), "insights section has no groups")
-            for group in groups:
-                require(bool(group.get("id")), "insights group without id")
-                require(bool((group.get("title") or {}).get("zh")), "insights group without title")
-        elif sid == "github":
-            repos_count = len(items)
-            require(
-                repos_count <= max_repos,
-                f"github has {repos_count} items (max {max_repos})",
-            )
-        for item in items:
-            for field in ("title", "summary", "comment"):
-                block = item.get(field) or {}
-                if not str(block.get("zh", "")).strip() or not str(block.get("en", "")).strip():
-                    item_issues += 1
-                    failures.append(
-                        {"issue": f"item missing bilingual {field}", "title": (item.get("title") or {}).get("zh", "")[:40]}
-                    )
-            sources = item.get("sources")
-            if not isinstance(sources, list) or not sources:
-                item_issues += 1
-                failures.append(
-                    {"issue": "item has no sources", "title": (item.get("title") or {}).get("zh", "")[:40]}
-                )
+    report = content_schema.check(content)
+    view = report.view
+    if view is None or report.unknown_shape:
+        return _result(
+            name,
+            False,
+            "cannot check duplicates: the article shape is not declared",
+            decision=Decision.CANNOT_VERIFY,
+            failure_class=FailureClass.UNKNOWN_VARIANT,
+            metrics={"duplicate_pairs": 0, "borderline_pairs": 0},
+        )
 
-    references = content.get("references") or []
-    require(bool(references), "no references")
+    candidates = dedup.build_candidates(
+        view, reference_urls=dedup.reference_url_map(view.references)
+    )
+    plan = dedup.compare(candidates)
+    outcome = dedup.resolve(plan)  # the gate never calls a model
 
     metrics = {
-        "insights": insights_count,
-        "repos": repos_count,
-        "references": len(references),
-        "item_issues": item_issues,
+        "items": len(candidates),
+        "duplicate_pairs": len(plan.duplicates),
+        "borderline_pairs": len(plan.borderline),
+        "max_pair_score": round(plan.pairs[0].score, 3) if plan.pairs else 0.0,
+        "duplicates": [entry["location"] for entry in outcome.dropped],
     }
-    return failures, metrics
+    if outcome.unjudged:
+        metrics["unjudged_pairs"] = [pair["score"] for pair in outcome.unjudged]
+        metrics["unjudged_examples"] = [
+            {
+                "score": pair["score"],
+                "a": pair["a"]["title"],
+                "b": pair["b"]["title"],
+            }
+            for pair in outcome.unjudged[:5]
+        ]
+
+    if outcome.dropped:
+        return _result(
+            name,
+            False,
+            f"{len(outcome.dropped)} item(s) duplicate an earlier item",
+            decision=Decision.FAIL,
+            failure_class=FailureClass.POLICY_VIOLATION,
+            failures=[
+                {
+                    "issue": f"duplicate of {entry['kept']} (score {entry['score']})",
+                    "title": entry["title"],
+                    "reasons": entry["reasons"],
+                }
+                for entry in outcome.dropped
+            ],
+            remediation=(
+                "Drop the duplicate in compose (dedup runs there by default) or "
+                "merge the two items."
+            ),
+            metrics=metrics,
+        )
+
+    if plan.borderline and borderline == "cannot_verify":
+        return _result(
+            name,
+            False,
+            f"{len(plan.borderline)} grey-band pair(s) were never judged",
+            decision=Decision.CANNOT_VERIFY,
+            failure_class=FailureClass.PRECONDITION_UNKNOWN,
+            metrics=metrics,
+        )
+
+    detail = "no duplicates"
+    if plan.borderline:
+        detail = (
+            f"no clear duplicates; {len(plan.borderline)} grey-band pair(s) not "
+            "judged (see metrics.unjudged_examples)"
+        )
+    return _result(name, True, detail, metrics=metrics)
 
 
 @validator("daily_trends_references")
