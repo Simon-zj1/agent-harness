@@ -137,3 +137,8 @@ required = false
 [[validators]]
 name = "sitemap_sane"
 args = { path = "{site_repo}/sitemap.xml" }
+
+# 目录页必须含本期、且不含测试日期（你原规范里的最后一条检查）。
+[[validators]]
+name = "daily_trends_index"
+args = { path = "{tools_dir}/site/trends/index.html", expected_date = "{date}" }

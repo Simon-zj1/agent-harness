@@ -3,10 +3,11 @@
 from __future__ import annotations
 
 import json
+import tempfile
 import unittest
 from pathlib import Path
 
-from harness import validators
+from harness import taskspec, validators
 
 # Frozen fixture rather than the live capture. The live file is rewritten by the
 # fetch step, and a test that silently changes its own ground truth is worse than
@@ -141,6 +142,62 @@ class ValidatorTests(unittest.TestCase):
 
     def tearDown(self) -> None:
         self._tmpdir.cleanup()
+
+
+class ValidatorArgTests(unittest.TestCase):
+    """`run_all` 的模板替换：只有路径参数才当路径解析。"""
+
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self._tmp.name)
+
+    def tearDown(self) -> None:
+        self._tmp.cleanup()
+
+    def _index(self, body: str) -> Path:
+        path = self.root / "index.html"
+        path.write_text(body, encoding="utf-8")
+        return path
+
+    def _run(self, index: Path, **args) -> dict:
+        # The fixture dates are in January, before the real project start, so the
+        # plausible-date window is opened for the test instead of hard-coding
+        # 2026-09-01 into the assertions.
+        args.setdefault("earliest_date", "2026-01-01")
+        spec = taskspec.ValidatorSpec(
+            name="daily_trends_index",
+            args={"path": str(index), "expected_date": "{date}", **args},
+        )
+        results = validators.run_all(
+            [spec], task_dir=self.root, date="2026-01-02", run_dir=self.root
+        )
+        return results[0]
+
+    def test_date_argument_is_not_treated_as_a_path(self) -> None:
+        """A date passed through `{date}` must arrive as "2026-01-02", not task_dir/2026-01-02."""
+        result = self._run(self._index('<a href="/trends/2026-01-02/">期号</a>'))
+        self.assertTrue(result["ok"], result.get("failures"))
+
+    def test_index_missing_the_current_issue_fails(self) -> None:
+        result = self._run(self._index('<a href="/trends/2026-01-01/">上一期</a>'))
+        self.assertFalse(result["ok"])
+        self.assertTrue(
+            any("does not list" in str(f.get("issue")) for f in result["failures"]),
+            result["failures"],
+        )
+
+    def test_index_with_a_stray_old_date_fails(self) -> None:
+        result = self._run(
+            self._index(
+                '<a href="/trends/2026-01-02/">本期</a><a href="/trends/2026-01-01/">上一期</a>'
+                '<a href="/trends/2020-01-01/">测试日期</a>'
+            )
+        )
+        self.assertFalse(result["ok"])
+        self.assertTrue(
+            any("out-of-range" in str(f.get("issue")) for f in result["failures"]),
+            result["failures"],
+        )
 
 
 if __name__ == "__main__":

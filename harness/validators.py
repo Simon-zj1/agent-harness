@@ -7,7 +7,9 @@ but it is derived, and `CANNOT_VERIFY` is deliberately *not* ok.
 
 from __future__ import annotations
 
+import datetime as dt
 import json
+import re
 from pathlib import Path
 from typing import Any, Callable
 
@@ -1243,6 +1245,59 @@ def _url_in_raw(url: str, raw_urls: set[str]) -> bool:
     return any(raw.startswith(base) or base.startswith(raw) for raw in raw_urls if len(base) > 20)
 
 
+@validator("daily_trends_index")
+def daily_trends_index(
+    path: str | Path,
+    *,
+    expected_date: str,
+    earliest_date: str = "2026-09-01",
+    name: str = "daily_trends_index",
+) -> dict[str, Any]:
+    """目录页必须含本期，且不能出现测试日期。
+
+    This is the last of the checks the daily spec asked for and the only one that
+    looked at the *generated index* rather than the content: a期号 page that
+    silently lacks today, or that carries a stray test date, is a reader-visible
+    defect that content validation cannot see.
+    """
+    target = Path(path)
+    if not target.is_file():
+        return _result(
+            name,
+            False,
+            f"index page not found: {target}",
+            decision=Decision.CANNOT_VERIFY,
+            failure_class=FailureClass.PRECONDITION_UNKNOWN,
+            remediation="Render first (`render_site.py --date <date>`), then re-run the gate.",
+            metrics={"dates": 0},
+        )
+    html = target.read_text(encoding="utf-8", errors="replace")
+    dates = sorted(set(re.findall(r"/trends/(\d{4}-\d{2}-\d{2})/", html)))
+    failures: list[dict[str, Any]] = []
+    if expected_date not in dates:
+        failures.append({"issue": f"index does not list {expected_date}"})
+    for date in dates:
+        if date < earliest_date:
+            failures.append({"issue": f"index lists an out-of-range date: {date}"})
+        try:
+            dt.date.fromisoformat(date)
+        except ValueError:
+            failures.append({"issue": f"index lists an invalid date: {date}"})
+    ok = not failures
+    return _result(
+        name,
+        ok,
+        f"index ok ({len(dates)} issues, latest {dates[-1] if dates else '—'})"
+        if ok
+        else f"{len(failures)} index problem(s)",
+        failures=failures[:20],
+        remediation="Re-render the index; a stale or test date must not ship."
+        if not ok
+        else None,
+        metrics={"dates": len(dates), "latest": dates[-1] if dates else None},
+    )
+
+
 def run_all(
     specs: list[Any],
     *,
@@ -1262,21 +1317,32 @@ def run_all(
 
     policy = policy or DecisionPolicy()
     results: list[dict[str, Any]] = []
+    #: 只有这些参数是路径。以前这里把**所有**字符串参数都按路径解析，于是
+    #: `expected_date = "{date}"` 会被拼成 `<task_dir>/2026-10-05`，闸门拿着一个
+    #: 日期字符串去当路径找文件。日期、名称、模式这类参数必须原样传进去。
+    path_keys = {"path", "paths", "tools_dir"}
+
+    def _as_path(rendered: str) -> Path:
+        path = Path(rendered).expanduser()
+        return path if path.is_absolute() else task_dir / rendered
+
     for spec in specs:
         func = get(spec.name)
         kwargs = {}
         for key, value in (spec.args or {}).items():
-            if isinstance(value, str):
+            is_path_key = key in path_keys or key.endswith("_path") or key.endswith("_dir")
+            if isinstance(value, str) and is_path_key:
                 rendered = render(value, date=date, run_dir=run_dir, extra=extra)
-                path = Path(rendered).expanduser()
-                kwargs[key] = path if path.is_absolute() else task_dir / rendered
+                kwargs[key] = _as_path(rendered)
             elif isinstance(value, list):
                 resolved = []
                 for entry in value:
                     rendered = render(str(entry), date=date, run_dir=run_dir, extra=extra)
-                    path = Path(rendered).expanduser()
-                    resolved.append(str(path if path.is_absolute() else task_dir / rendered))
+                    resolved.append(str(_as_path(rendered)))
                 kwargs[key] = resolved
+            elif isinstance(value, str):
+                # 非路径字符串：只做 {date} / {run_dir} 模板替换，原样传值。
+                kwargs[key] = render(value, date=date, run_dir=run_dir, extra=extra)
             else:
                 kwargs[key] = value
         try:
