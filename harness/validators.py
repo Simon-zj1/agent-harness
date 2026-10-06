@@ -303,7 +303,14 @@ def daily_trends_no_duplicates(
 def daily_trends_references(
     path: str | Path, *, name: str = "daily_trends_references"
 ) -> dict[str, Any]:
-    """Reference ids must resolve, urls must be http(s), and nothing may be orphaned."""
+    """Reference ids must resolve and urls must be http(s).
+
+    Severity is calibrated to consequence. A source id with no reference, a
+    duplicate id or a non-http url breaks the page and blocks. An *orphan*
+    reference (declared, never cited) only leaves an unused row in the source
+    list: it is reported as a warning, not as a reason to stop a daily publish.
+    Blocking on cosmetics is how a gate teaches its operator to bypass it.
+    """
     try:
         content = load_content(path)
     except ValidationFailed as exc:
@@ -338,26 +345,31 @@ def daily_trends_references(
                     failures.append({"issue": "source id has no reference", "id": source})
 
     orphans = sorted(id_set - used)
-    if orphans:
-        failures.append({"issue": "reference never cited", "ids": orphans})
-
     ok = not failures
+    warnings = (
+        [{"issue": "reference never cited", "ids": orphans}] if orphans else []
+    )
+    if ok and orphans:
+        detail = f"references ok ({len(orphans)} orphan reference(s) reported)"
+    else:
+        detail = "references ok" if ok else f"{len(failures)} reference problem(s)"
     return _result(
         name,
         ok,
-        "references ok" if ok else f"{len(failures)} reference problem(s)",
+        detail,
         remediation=(
-            "Every cited source id must resolve, every reference must be cited at "
-            "least once, and urls must be http(s). Drop the orphan references or "
-            "cite them."
+            "Every cited source id must resolve and every reference url must be "
+            "http(s)."
         )
         if not ok
         else None,
         failures=failures[:40],
+        warnings=warnings,
         metrics={
             "references": len(references),
             "cited": len(used),
             "orphans": len(orphans),
+            "warnings": len(warnings),
         },
     )
 
@@ -407,6 +419,8 @@ def daily_trends_verifiable(
     verdicts: dict[int, Any] = {}
     evidence_items: list[Evidence] = []
     tally = {"pass": 0, "cannot_verify": 0, "fail": 0}
+    stale: dict[int, list[str]] = {}
+    other_days: dict[str, set[str]] | None = None
     for ref in cited:
         ref_id = ref.get("id")
         url = str(ref.get("url", ""))
@@ -414,10 +428,31 @@ def daily_trends_verifiable(
         verdicts[ref_id] = verdict
         tally[verdict.decision.value] = tally.get(verdict.decision.value, 0) + 1
         if verdict.decision is not Decision.PASS:
+            detail = verdict.reason
+            if verdict.decision is Decision.FAIL:
+                # "matches nothing" and "matches yesterday's capture" are very
+                # different problems: the first is a fabrication risk, the
+                # second is a producer that reused stale material (2026-10-05
+                # cited 8 arXiv papers from 10-04, when that day's arXiv fetch
+                # had returned nothing). Name the day instead of making the
+                # reader guess which one it is.
+                if other_days is None:
+                    other_days = _other_capture_index(raw_file)
+                days = sorted(
+                    day for day, urls in other_days.items() if canonical_url(url) in urls
+                )
+                if days:
+                    stale[ref_id] = days
+                    detail = (
+                        "cited url is not in this day's capture but is in the capture "
+                        f"of {', '.join(days)}"
+                    )
+                else:
+                    detail = "cited url is in no capture at all"
             evidence_items.append(
                 Evidence(
                     ref=f"ref#{ref_id}",
-                    detail=verdict.reason,
+                    detail=detail,
                     url=url,
                 )
             )
@@ -468,8 +503,36 @@ def daily_trends_verifiable(
             "verifiable_ratio": round(ratio, 4),
             "cannot_verify": tally["cannot_verify"],
             "fail": tally["fail"],
+            "stale_citations": len(stale),
+            "stale_from_days": sorted({day for days in stale.values() for day in days}),
         },
     )
+
+
+def _other_capture_index(raw_path: Path, *, limit: int = 30) -> dict[str, set[str]]:
+    """Map day -> canonical urls for neighbouring captures.
+
+    Built lazily (only when a citation fails today's capture) and limited to the
+    most recent `limit` days, so a long history does not make every validation
+    read every file.
+    """
+    raw_dir = raw_path.parent
+    if not raw_dir.is_dir():
+        return {}
+    today = raw_path.stem
+    days = [
+        path.stem
+        for path in sorted(raw_dir.glob("20*.json"), reverse=True)
+        if path.stem != today
+    ][:limit]
+    index: dict[str, set[str]] = {}
+    for day in days:
+        try:
+            payload = json.loads((raw_dir / f"{day}.json").read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        index[day] = {canonical_url(u) for u in _collect_urls(payload)}
+    return index
 
 
 @validator("refund_decisions_fail_closed")

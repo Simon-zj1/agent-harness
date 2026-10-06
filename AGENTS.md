@@ -29,6 +29,10 @@
 9. 重复判定按栏目区分：同栏目 + 同源 + 标题重合是硬重复（拦发布）；跨栏目的重合是判断题，
    只记录不自动删（综述与它引用的仓库是两件事）。
 10. 「选得准不准」只能在有人工标注时给数字：`verify selection` 的 `gold` 列不许由脚本代填。
+11. 闸门严重度按后果定：破坏页面或引用图的错误拦发布；装饰性问题（孤立参考文献、跨栏目重复）
+    记为告警。新增拦截前先问一句「这个错误会让人去绕闸门吗」。
+12. 站点部署前会跑 `verify release`（在 `blog/tools/deploy.sh` 里）。要发布未过闸门的版本，
+    用 `AGENT_RELEASE_GATE=off` 显式跳过，不要默认关掉这道门。
 
 ## 验证
 
@@ -42,6 +46,7 @@ python3 -m unittest discover -t . -s tests -v
 ./agent verify probes
 ./agent verify content
 ./agent verify selection --sample 100      # 生成待标注清单；填完 gold 后再 --score
+./agent verify release                     # 发布闸门（blog/tools/deploy.sh 会调用它）
 ```
 
 `-t .` 是必需的：测试用相对导入（`from .helpers import ...`），不指定顶层目录会直接

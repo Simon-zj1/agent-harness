@@ -454,17 +454,21 @@ def content_debt(days: Iterable[str], *, root: Path | None = None) -> dict[str, 
                 "cannot_verify": (verifiable.get("metrics") or {}).get("cannot_verify"),
                 "fail": (verifiable.get("metrics") or {}).get("fail"),
                 "orphan_references": (references.get("metrics") or {}).get("orphans"),
+                "warnings": len(references.get("warnings") or []),
                 "blockers": blockers,
                 "clean": not blockers,
             }
         )
     dirty = [row for row in rows if not row["clean"]]
     stale = [row for row in rows if row["gate_stale"]]
+    warned = [row for row in rows if row["clean"] and row.get("warnings")]
     return {
         "generated_at": dt.datetime.now().astimezone().isoformat(timespec="seconds"),
         "days": len(rows),
         "clean": len(rows) - len(dirty),
         "dirty": len(dirty),
+        "clean_with_warnings": len(warned),
+        "warned": [row["day"] for row in warned],
         "gate_stale_days": len(stale),
         "gate_stale": [row["day"] for row in stale],
         "rows": rows,
@@ -480,9 +484,11 @@ def content_debt_markdown(report: dict[str, Any]) -> str:
         "",
         f"- 其中 {report.get('gate_stale_days', 0)} 天的结构闸门**不认识内容形状**"
         "（契约变化、闸门滞后），不是内容缺陷",
+        f"- {report.get('clean_with_warnings', 0)} 天通过但有告警（如未引用的孤立参考文献）："
+        "这类问题不拦发布，只记录，避免把闸门变成必须被绕过的噪声",
         "",
-        "| 日期 | 形状 | 结构 | 引用 | 可核验 | 可核验率 | 重复 | 灰区 | 孤儿引用 | 卡在哪 |",
-        "| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |",
+        "| 日期 | 形状 | 结构 | 引用 | 可核验 | 可核验率 | 重复 | 灰区 | 孤儿引用 | 告警 | 卡在哪 |",
+        "| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |",
     ]
     for row in report["rows"]:
         mark = lambda ok: "ok" if ok else "**FAIL**"  # noqa: E731
@@ -498,7 +504,7 @@ def content_debt_markdown(report: dict[str, Any]) -> str:
             f"{mark(row['verifiable'])} | {'—' if ratio is None else f'{ratio:.2f}'} | "
             f"{row.get('duplicate_pairs') if row.get('duplicate_pairs') is not None else '—'} | "
             f"{row.get('borderline_pairs') if row.get('borderline_pairs') is not None else '—'} | "
-            f"{row['orphan_references']} | "
+            f"{row['orphan_references']} | {row.get('warnings', 0)} | "
             f"{', '.join(row['blockers']) or '—'} |"
         )
     lines += [
@@ -511,6 +517,9 @@ def content_debt_markdown(report: dict[str, Any]) -> str:
         "  应当去补契约或改产线，而不是去修历史稿件。",
         "- `重复` 是同一篇里同一件事出现两次的硬重复（字符串可证）；`灰区` 是需要人工/模型",
         "  判断的相似对，闸门不做模型调用，所以只报数不判。",
+        "- `可核验`列的失败信息会区分两种情况：引用的 URL 出现在**别的某一天**的抓取里",
+        "  （产线用了陈旧素材，例如 10-05 引了 10-04 的 arXiv），或**任何一天都没有**",
+        "  （编造风险更高）。这两种问题要分开修。",
         "- 可核验率下降有两种原因，需要分开看：引用确实不在当天抓取里，或当天的抓取文件",
         "  被后续运行覆盖过（`fetch` 曾经在 dry-run 下也执行）。后者属于可复现性事故。",
         "",

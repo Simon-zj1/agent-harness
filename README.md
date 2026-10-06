@@ -22,6 +22,7 @@ cd /path/to/agent-harness
 ./agent verify probes                                              # 对抗探针（schema/dedup/refund/merge）
 ./agent verify content                                             # 逐日内容债：区分「闸门过期」与真缺陷
 ./agent verify selection --sample 100                              # 生成待标注清单（gold 列留空）
+./agent verify release                                             # 发布闸门：最近一天必须全过（站点部署会调用）
 ```
 
 `verify corpus` / `verify eval` 依赖仓库外的 `daily-trends` 抓取数据。默认取本仓库
@@ -33,6 +34,9 @@ cd /path/to/agent-harness
 - **发布是单一写入者**：站点由 `blog/tools/deploy.sh`（Hexo）生成并发布，本仓库
   `[publish] default_enabled = false`。harness 负责生成、验收与诊断，不直接 push 站点
   仓库——两个写入者曾在 `tech/papers/rrsi-harness-rsi` 上删掉 792 行。
+- **验收现在是发布前的一道门**：`blog/tools/deploy.sh` 在构建前调用 `./agent verify release`，
+  最近一天没过闸门就不发布（显式跳过：`AGENT_RELEASE_GATE=off ./tools/deploy.sh`）。
+  在此之前所有闸门都只是事后诊断——10-05 的缺陷就是先上线、后被报告抓到的。
 - **内容债 10/16 天干净**（`./agent verify content`）。剩下 6 天是各自不同的问题，
   不再混成一个数字。
 - **契约漂移曾是最严重的问题**：产线在 16 天里换过三种正文形状
@@ -41,7 +45,12 @@ cd /path/to/agent-harness
   `harness/content_schema.py`；再出现新形状，闸门回答 CANNOT_VERIFY（不是 PASS）并指名
   是哪个章节/条目。**改内容形状时先改契约，再改产线。**
 - **一条真实的当前缺陷**：2026-10-05 的稿子引用了 8 篇 arXiv 论文，而当天 arXiv 抓取
-  为 0 条——引用来自 10-04 的抓取。`daily_trends_verifiable` 判失败（可核验率 0.79）。
+  为 0 条——引用来自 10-04 的抓取。`daily_trends_verifiable` 判失败（可核验率 0.79），
+  并且**点名来源日期**：失败信息区分「只出现在 10-04 的抓取里」和「任何一天都没有」，
+  前者是产线用了陈旧素材，后者编造风险更高——两种问题要分开修。
+- **闸门严重度按后果校准**：悬空引用编号、非 http 链接、超上限、硬重复 → 拦发布；
+  孤立参考文献（声明了但没被引用）、跨栏目重复 → 记录为告警。把装饰性问题也做成拦截，
+  只会训练操作者绕过闸门。
 - **重复检测按栏目区分**：同栏目 + 同源 + 标题重合 → 硬重复，拦截发布；跨栏目的重复
   （综述 vs 它引用的仓库）只报数不判，交给人工或灰区模型判定。
 - **「选得准不准」还没有数据**：`verify selection` 能生成 100 条均衡候选清单，但

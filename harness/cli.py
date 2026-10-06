@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import datetime as dt
 import json
+import os
 import shutil
 import sys
 from pathlib import Path
@@ -254,6 +255,14 @@ def build_parser() -> argparse.ArgumentParser:
         help="score this already-labelled sheet (jsonl or csv) instead of building one",
     )
     v_selection.set_defaults(_handler=cmd_verify_selection)
+    v_release = ver_sub.add_parser(
+        "release",
+        help="gate the site deploy: the newest day must pass every content gate",
+    )
+    v_release.add_argument(
+        "--days", type=int, default=1, help="how many of the newest days to check"
+    )
+    v_release.set_defaults(_handler=cmd_verify_release)
     return parser
 
 
@@ -761,14 +770,68 @@ def cmd_verify_content(args: argparse.Namespace) -> int:
     )
     for row in report["rows"]:
         flag = "ok  " if row["clean"] else "FAIL"
+        if row["clean"] and row.get("warnings"):
+            flag = "ok* "
         log.info(
             f"  {flag} {row['day']}  ratio={row['verifiable_ratio']} "
             f"fail={row['fail']} orphans={row['orphan_references']} "
             f"blockers={','.join(row['blockers']) or '-'}"
         )
     log.info(f"干净 {report['clean']}/{report['days']} 天")
+    if report.get("clean_with_warnings"):
+        log.info(
+            f"ok* = 通过但有告警（{', '.join(report['warned'])}）：不拦发布，只记录"
+        )
     log.info(f"report: {outdir / 'report.md'}")
     return EXIT_OK
+
+
+def cmd_verify_release(args: argparse.Namespace) -> int:
+    """The gate the site deploy calls before it publishes anything.
+
+    Without this, every other check in this repository is a post-mortem: the
+    harness can prove a day was bad, but only after it is already on the site.
+    `AGENT_RELEASE_GATE=off` is the deliberate, visible way to publish anyway.
+    """
+    log = console()
+    if os.environ.get("AGENT_RELEASE_GATE", "on").lower() == "off":
+        log.info("release gate skipped: AGENT_RELEASE_GATE=off")
+        return EXIT_OK
+
+    days = verification_eval.available_days()
+    if not days:
+        log.error("release gate: no day has both a capture and a composed article")
+        return EXIT_FAIL
+    target = days[-max(1, args.days) :]
+    report = verification_eval.content_debt(target)
+    dirty = [row for row in report["rows"] if not row["clean"]]
+
+    for row in report["rows"]:
+        mark = "ok  " if row["clean"] else "FAIL"
+        log.info(
+            f"  {mark} {row['day']}  blockers={','.join(row['blockers']) or '-'}  "
+            f"ratio={row['verifiable_ratio']}"
+        )
+    if not dirty:
+        log.info(f"release gate: {', '.join(target)} 通过全部内容闸门")
+        return EXIT_OK
+
+    outdir = paths.runs_dir() / "verification" / "release"
+    outdir.mkdir(parents=True, exist_ok=True)
+    (outdir / "report.json").write_text(
+        json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8"
+    )
+    detail = verification_eval.content_debt_markdown(report)
+    (outdir / "report.md").write_text(detail, encoding="utf-8")
+    log.error(
+        "release gate: 内容未通过验收，阻止发布 —— "
+        + "; ".join(f"{row['day']}: {','.join(row['blockers'])}" for row in dirty)
+    )
+    for row in dirty:
+        log.error(f"  详情见 {outdir / 'report.md'}")
+        break
+    log.error("  修好内容后重试；确实要发布未过闸门的版本：AGENT_RELEASE_GATE=off")
+    return EXIT_FAIL
 
 
 def cmd_verify_selection(args: argparse.Namespace) -> int:

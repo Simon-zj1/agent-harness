@@ -518,7 +518,54 @@ def probe_registry() -> dict[str, Callable[[], list[Probe]]]:
         "merge": merge_probes,
         "schema": schema_probes,
         "dedup": duplicate_probes,
+        "references": reference_probes,
     }
+
+
+def reference_probes() -> list[Probe]:
+    """Probes for `daily_trends_references`.
+
+    These pin the severity calibration: a broken citation graph blocks, a
+    cosmetic orphan does not. Getting this the other way round is what makes an
+    operator reach for the bypass flag.
+    """
+    with_orphan = _article()
+    with_orphan["references"] = [
+        {"id": 1, "title": "cited", "url": "https://example.com/a"},
+        {"id": 2, "title": "never cited", "url": "https://example.com/b"},
+    ]
+    dangling = _article()
+    dangling["sections"][1]["items"][0] = {
+        "title": {"zh": "repo", "en": "repo"},
+        "prose": {"zh": "x", "en": "y"},
+        "sources": [7],
+    }
+    non_http = _article()
+    non_http["references"] = [{"id": 1, "title": "local file", "url": "file:///etc/passwd"}]
+
+    return [
+        Probe(
+            "refs-orphan-is-a-warning",
+            "daily_trends_references",
+            with_orphan,
+            EXPECT_PASS,
+            "an unused reference row is cosmetic: report it, do not stop the publish",
+        ),
+        Probe(
+            "refs-dangling-source-id",
+            "daily_trends_references",
+            dangling,
+            EXPECT_NOT_PASS,
+            "a cited id with no reference breaks the page",
+        ),
+        Probe(
+            "refs-non-http-url",
+            "daily_trends_references",
+            non_http,
+            EXPECT_NOT_PASS,
+            "only http(s) sources are publishable",
+        ),
+    ]
 
 
 def all_probes(name: str | None = None) -> list[Probe]:
