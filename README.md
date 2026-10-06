@@ -87,6 +87,8 @@ memory/ runs/             记忆与运行产物（AGENT_HOME 可整体迁移）
 阅读侧的产物在工具仓库里：`daily-trends/tools/brief.py`（今日速读的选择与渲染）与
 `daily-trends/config/interests.json`（**我关注什么**：加分方向 + 排除类别 + 方法词白名单）。
 改那个 JSON 就能改每天先看到什么，不用改代码。
+那套工具与每日内容有自己的仓库（私有）：**github.com/Simon-zj1/daily-trends**，
+流程规范是其中的 `tools/RUNBOOK.md`；每期发布后由定时任务追加一条 `content: <date>` 提交。
 
 ### 阅读质量：现在能量化了
 
