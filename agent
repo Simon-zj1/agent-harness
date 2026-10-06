@@ -14,5 +14,24 @@ export PYTHONPATH="$HERE${PYTHONPATH:+:$PYTHONPATH}"
 export PYTHONUNBUFFERED=1
 export LC_ALL="${LC_ALL:-en_US.UTF-8}"
 
-PY="${AGENT_PYTHON:-python3}"
+# Pick a python that can actually run the harness (>=3.11, has tomllib).
+# Callers with a constrained PATH shadow python3 with the system 3.9 — the site
+# deploy script prepends /Library/Developer/CommandLineTools/usr/bin, which made
+# the release gate fail inside deploy.sh while passing in a normal shell.
+resolve_python() {
+  local candidate
+  for candidate in "${AGENT_PYTHON:-}" /opt/homebrew/bin/python3 /usr/local/bin/python3 "$(command -v python3 2>/dev/null || true)"; do
+    [[ -n "$candidate" && -x "$candidate" ]] || continue
+    if "$candidate" -c 'import sys, tomllib; sys.exit(0 if sys.version_info >= (3, 11) else 1)' >/dev/null 2>&1; then
+      printf '%s\n' "$candidate"
+      return 0
+    fi
+  done
+  return 1
+}
+
+PY="$(resolve_python)" || {
+  echo "agent: no python >= 3.11 with tomllib found (set AGENT_PYTHON=/path/to/python3)" >&2
+  exit 1
+}
 exec "$PY" -m harness.cli "$@"
