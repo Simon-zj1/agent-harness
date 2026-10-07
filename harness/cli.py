@@ -839,21 +839,34 @@ def cmd_verify_release(args: argparse.Namespace) -> int:
         log.info("release gate skipped: AGENT_RELEASE_GATE=off")
         return EXIT_OK
 
-    days = verification_eval.available_days()
+    # 按**成品**的日期审：即将发布的那一天。用 available_days()（要求 raw 也在）
+    # 会让「最新一天缺 raw」时闸门自动退到前一天并放行（审计发现 1.1）。
+    days = verification_eval.content_days()
     if not days:
-        log.error("release gate: no day has both a capture and a composed article")
+        log.error("release gate: 找不到任何成品内容（data/<date>.json）")
         return EXIT_FAIL
     target = days[-max(1, args.days) :]
     report = verification_eval.content_debt(
         target, required=_required_validators(), tools_dir=_task_tools_dir()
     )
+    # 无论通过与否都留档：以前只有失败才写 report.json，于是"通过但有告警"的
+    # 那一次在磁盘上没有任何痕迹（审计发现 2.2）。
+    outdir = paths.runs_dir() / "verification" / "release"
+    outdir.mkdir(parents=True, exist_ok=True)
+    (outdir / "report.json").write_text(
+        json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8"
+    )
+    (outdir / "report.md").write_text(
+        verification_eval.content_debt_markdown(report), encoding="utf-8"
+    )
     dirty = [row for row in report["rows"] if not row["clean"]]
 
     for row in report["rows"]:
         mark = "ok  " if row["clean"] else "FAIL"
+        extra = " raw缺失" if row.get("raw_missing") else ""
         log.info(
             f"  {mark} {row['day']}  blockers={','.join(row['blockers']) or '-'}  "
-            f"ratio={row['verifiable_ratio']}"
+            f"ratio={row['verifiable_ratio']}{extra}"
         )
 
     # 尺度：破坏页面/结构的问题拦发布；引用「来自别的某天」是产线用了陈旧素材，
@@ -863,11 +876,15 @@ def cmd_verify_release(args: argparse.Namespace) -> int:
     for row in dirty:
         hard = [name for name in row["blockers"] if name != "verifiable"]
         if "verifiable" in row["blockers"]:
-            if (row.get("unknown_citations") or 0) > 0:
+            if row.get("raw_missing"):
+                # 没有当日抓取 → 一条都核验不了，不是"用了昨天的素材"，拦发布。
+                hard.append("verifiable")
+                warned.append(f"{row['day']}: 缺少当日 raw 抓取，无法核验任何引用")
+            elif (row.get("unknown_citations") or 0) > 0:
                 hard.append("verifiable")
             else:
                 warned.append(
-                    f"{row['day']}: {row.get('stale_citations')} 条引用来自其它日期的抓取"
+                    f"{row['day']}: {row.get('stale_citations') or 0} 条引用来自其它日期的抓取"
                 )
         if hard:
             blocking.append({**row, "hard_blockers": hard})
@@ -885,15 +902,9 @@ def cmd_verify_release(args: argparse.Namespace) -> int:
             )
     if not blocking:
         log.info(f"release gate: {', '.join(target)} 通过全部内容闸门")
+        log.info(f"  report: {outdir / 'report.md'}")
         return EXIT_OK
 
-    outdir = paths.runs_dir() / "verification" / "release"
-    outdir.mkdir(parents=True, exist_ok=True)
-    (outdir / "report.json").write_text(
-        json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8"
-    )
-    detail = verification_eval.content_debt_markdown(report)
-    (outdir / "report.md").write_text(detail, encoding="utf-8")
     log.error(
         "release gate: 内容未通过验收，阻止发布 —— "
         + "; ".join(f"{row['day']}: {','.join(row['hard_blockers'])}" for row in blocking)

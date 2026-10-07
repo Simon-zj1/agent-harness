@@ -396,6 +396,18 @@ def available_days(*, root: Path | None = None) -> list[str]:
     return days
 
 
+def content_days(*, root: Path | None = None) -> list[str]:
+    """Days that have a composed article — raw or not.
+
+    发布闸门要按**成品**的日期审（"即将发布的那一天"），而不是按"证据齐全的那一天"。
+    少了这个区分，最新一天缺 raw 时闸门会去看前一天并放行（审计发现 1.1）。
+    """
+    base = root or data_dir()
+    if not base.is_dir():
+        return []
+    return sorted(path.stem for path in base.glob("20*.json"))
+
+
 _SHORT_NAMES = {
     "daily_trends_structure": "structure",
     "daily_trends_references": "references",
@@ -433,8 +445,12 @@ def content_debt(
     for day in days:
         content = base / f"{day}.json"
         raw = base / "raw" / f"{day}.json"
-        if not content.is_file() or not raw.is_file():
+        if not content.is_file():
             continue
+        # 有成品但没有当日 raw：不是"跳过"，而是**这一天的证据不完整**。
+        # 以前这里 `continue`，于是 available_days() 给出的"最近一天"会自动退到
+        # 前一天，发布闸门审的是昨天、放行的是今天（独立审计发现 1.1）。
+        raw_missing = not raw.is_file()
         structure = validators_mod.daily_trends_structure(content)
         references = validators_mod.daily_trends_references(content)
         verifiable = validators_mod.daily_trends_verifiable(content, raw)
@@ -484,6 +500,7 @@ def content_debt(
         rows.append(
             {
                 "day": day,
+                "raw_missing": raw_missing,
                 "structure": structure.get("ok"),
                 "structure_decision": structure.get("decision"),
                 "gate_stale": gate_stale,

@@ -23,8 +23,8 @@ jobs:
           python-version: ${{ matrix.python-version }}
 
       - name: Unit tests
-        # 22 of these are skipped without a daily-trends capture on disk; the rest
-        # run entirely from tests/fixtures so a fresh clone is testable.
+        # Some of these skip without a daily-trends checkout on disk (28 at the time of
+        # writing); the rest run entirely from tests/fixtures so a fresh clone is testable.
         run: python3 -m unittest discover -t . -s tests -v
 
       - name: Validator probes

@@ -1149,6 +1149,19 @@ def sitemap_sane(
 
     target = Path(path)
     if not target.is_file():
+        if not target.parent.exists():
+            # 站点仓库根本不在本机（例如只 clone 了工具仓库的机器跑 dry-run）：
+            # 这不是"站点漂移"，是"这个闸门在此处不适用"。判 FAIL 会让文档里的
+            # 冒烟命令在一台合法环境上失败（审计发现 2.1）。
+            return _result(
+                name,
+                False,
+                f"站点仓库不存在，跳过 sitemap 检查：{target.parent}",
+                decision=Decision.ABSTAIN,
+                failure_class=FailureClass.NOT_APPLICABLE,
+                remediation="设 SITE_REPO_DIR 指到站点仓库；只跑预览时可以忽略这条。",
+                metrics={"urls": 0, "applicable": False},
+            )
         return _result(name, False, f"missing sitemap: {target}")
     text = target.read_text(encoding="utf-8", errors="replace")
     failures: list[dict[str, Any]] = []

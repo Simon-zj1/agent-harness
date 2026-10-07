@@ -63,7 +63,10 @@ add = ["trends", "css/trends.css", "tech/index.html", "sitemap.xml"]
 # on_cannot_verify = "warn", records the uncertainty and continues.
 on_fail = "block"
 on_cannot_verify = "block"
-on_abstain = "block"
+# ABSTAIN 表示"这条闸门在本次环境里不适用"，而不是"不确定"：例如本机没有站点
+# 仓库时 sitemap_sane 无从检查。判 block 会让文档里的 dry-run 冒烟在一台合法
+# 环境上失败（独立审计发现 2.1）；判 warn 仍然会在报告里留下记录。
+on_abstain = "warn"
 
 [trigger]
 type = "launchd"

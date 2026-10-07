@@ -278,6 +278,83 @@ class ReleaseGateTests(unittest.TestCase):
         self.assertIn("来自其它日期的抓取", result.stdout)
 
 
+class ReleaseTargetTests(unittest.TestCase):
+    """发布闸门审的是「即将发布的那一天」，不是「证据最齐的那一天」。
+
+    独立审计发现 1.1：最新一天只有成品、没有当日 raw 时，闸门会退到前一天并放行，
+    而部署会把那篇从未被审过的稿件一起发出去。
+    """
+
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self._tmp.name)
+        (self.root / "raw").mkdir(parents=True)
+        self.env = dict(os.environ)
+        self.env["DAILY_TRENDS_DATA_DIR"] = str(self.root)
+        self.env["PYTHONPATH"] = str(REPO)
+        self.env["DAILY_TRENDS_DIR"] = str(TOOLS_SOURCE)
+
+    def tearDown(self) -> None:
+        self._tmp.cleanup()
+
+    def _day(self, day: str, *, with_raw: bool) -> None:
+        url = "https://example.com/today"
+        if with_raw:
+            (self.root / "raw" / f"{day}.json").write_text(
+                json.dumps({"hn": [{"title": "t", "url": url}]}), encoding="utf-8"
+            )
+        content = _content(references=[{"id": 1, "title": "src", "url": url}], sources=[1])
+        content["date"] = day
+        (self.root / f"{day}.json").write_text(
+            json.dumps(content, ensure_ascii=False), encoding="utf-8"
+        )
+
+    def _gate(self) -> subprocess.CompletedProcess:
+        return subprocess.run(
+            [sys.executable, "-m", "harness.cli", "verify", "release", "--days", "1"],
+            cwd=str(REPO), env=self.env, capture_output=True, text=True, timeout=120,
+        )
+
+    def test_newest_day_without_raw_blocks_the_release(self) -> None:
+        self._day("2026-01-01", with_raw=True)
+        self._day("2026-01-02", with_raw=False)  # 成品在、证据不在
+        result = self._gate()
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn("2026-01-02", result.stdout)
+        self.assertIn("raw缺失", result.stdout)
+
+    def test_clean_newest_day_with_raw_still_passes(self) -> None:
+        self._day("2026-01-02", with_raw=True)
+        result = self._gate()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    def test_release_report_is_written_even_when_it_passes(self) -> None:
+        self._day("2026-01-02", with_raw=True)
+        home = Path(self.env.get("AGENT_HOME", str(REPO)))
+        report = home / "runs" / "verification" / "release" / "report.json"
+        before = report.stat().st_mtime if report.is_file() else 0
+        self._gate()
+        self.assertTrue(report.is_file(), "通过的那次也要留档，否则告警没有任何痕迹")
+        self.assertGreaterEqual(report.stat().st_mtime, before)
+
+
+class SitemapApplicabilityTests(unittest.TestCase):
+    """站点仓库不在本机时，sitemap 闸门是「不适用」，不是「失败」。"""
+
+    def test_missing_site_repo_is_abstain_not_fail(self) -> None:
+        from harness.decisions import DecisionPolicy, apply_policy
+
+        result = validators.sitemap_sane("/tmp/definitely-not-a-site-repo/sitemap.xml")
+        self.assertEqual(result["decision"], "abstain")
+        applied = apply_policy(dict(result), DecisionPolicy.from_table({"on_abstain": "warn"}))
+        self.assertTrue(applied["ok"], "不适用不该拦发布")
+
+    def test_present_but_broken_sitemap_is_still_a_failure(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            result = validators.sitemap_sane(Path(tmp) / "sitemap.xml")
+            self.assertEqual(result["decision"], "fail")
+
+
 @unittest.skipUnless(
     (TOOLS_SOURCE / "tools" / "brief.py").is_file(),
     "requires the sibling daily-trends checkout",
