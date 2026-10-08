@@ -276,6 +276,10 @@ def build_parser() -> argparse.ArgumentParser:
         "scope: withhold the file list and judge from the diff stat alone",
     )
     v_sweep.add_argument("--out", help="report directory")
+    v_sweep.add_argument(
+        "--reuse",
+        help="re-score a saved report.json at new thresholds without calling the model",
+    )
     v_sweep.set_defaults(_handler=cmd_verify_sweep)
     v_probes = ver_sub.add_parser(
         "probes", help="adversarial probes for a validator's invariants"
@@ -1055,101 +1059,8 @@ def cmd_verify_corpus(args: argparse.Namespace) -> int:
     return EXIT_OK
 
 
-def cmd_verify_sweep(args: argparse.Namespace) -> int:
-    """Plan A: score a per-evidence probability gate across thresholds.
-
-    Separate from `verify eval` on purpose. That command compares matchers that
-    already decided; this one decides *where the boundary should be*, which is
-    the extra step a probability gate buys. The judge proposes a number and the
-    threshold is swept in application code, so the model never sees a label.
-    """
-    log = console()
-    if not args.allow_llm:
-        log.error("verify sweep runs a paid model judge; pass --allow-llm to enable it")
-        return EXIT_FAIL
-
-    if args.criterion == "scope":
-        repo = args.repo or os.environ.get("AGENT_REPO_ROOT") or Path.cwd()
-        corpus = gate_sweep.build_scope_corpus(repo, limit=args.commits, max_per_kind=args.per_kind)
-        if not corpus["samples"]:
-            log.error(f"no commits to build a scope corpus from in {repo}")
-            return EXIT_FAIL
-        log.info(f"scope corpus: {len(corpus['samples'])} samples from {repo}")
-        rule_probs = gate_sweep.scope_rule_probabilities(corpus)
-    else:
-        corpus_path = Path(args.corpus) if args.corpus else verification_eval.default_corpus_path()
-        if corpus_path.is_file():
-            corpus = verification_eval.load_corpus(corpus_path)
-            log.info(f"corpus: {corpus_path} ({len(corpus.get('samples', []))} samples)")
-        else:
-            days = args.days or verification_eval.available_days()
-            if not days:
-                log.error("no corpus and no captures to build one from")
-                return EXIT_FAIL
-            corpus = verification_eval.build_corpus(days)
-            verification_eval.save_corpus(corpus_path, corpus)
-            log.info(f"corpus: built {len(corpus['samples'])} samples -> {corpus_path}")
-        rule_probs = None
-        before = len(corpus.get("samples", []))
-        if args.per_kind:
-            corpus = verification_eval.subsample(corpus, args.per_kind)
-        if len(corpus.get("samples", [])) != before:
-            log.info(f"judge budget: {len(corpus['samples'])}/{before} samples")
-
-    agent_config = config_mod.load()
-    provider = get_provider(agent_config)
-    ok, detail = provider.available()
-    if not ok:
-        log.error(f"judge unavailable: {detail}")
-        return EXIT_FAIL
-
-    def _progress(done: int, total: int) -> None:
-        if done == total or done % 10 == 0:
-            log.info(f"  judging {done}/{total}")
-
-    if args.criterion == "scope":
-        judge = gate_sweep.scope_probability_judge(provider, lossy=args.blind)
-        probs = gate_sweep.scope_probabilities(corpus, judge, progress=_progress)
-    else:
-        judge = gate_sweep.probability_judge(provider, blind=args.blind)
-        probs = gate_sweep.probabilities(corpus, judge, progress=_progress)
-    thresholds = gate_sweep.parse_thresholds(args.thresholds)
-    if not thresholds:
-        log.error(f"no thresholds parsed from {args.thresholds!r}")
-        return EXIT_FAIL
-    report = gate_sweep.sweep(
-        corpus,
-        probs,
-        thresholds=thresholds,
-        band=args.band,
-        judge_name=provider.name,
-        question=getattr(judge, "question", gate_sweep.DEFAULT_QUESTION),
-        blind=args.blind,
-        usage=getattr(judge, "usage", None),
-    )
-    report["criterion"] = args.criterion
-    report["blind_or_lossy"] = bool(args.blind)
-    if rule_probs is not None:
-        # The deterministic baseline, scored through the same path so the
-        # comparison is the same code and not a second implementation.
-        report["rule"] = gate_sweep.score_at(corpus, rule_probs, threshold=0.5)
-    outdir = (
-        Path(args.out)
-        if args.out
-        else paths.runs_dir()
-        / "verification"
-        / f"gate-sweep-{args.criterion}-{dt.datetime.now():%Y%m%d-%H%M%S}"
-    )
-    outdir.mkdir(parents=True, exist_ok=True)
-    (outdir / "report.md").write_text(gate_sweep.markdown(report), encoding="utf-8")
-    # The judge calls are the expensive part; keep them so the curve can be
-    # re-drawn at other thresholds for free.
-    (outdir / "probabilities.json").write_text(
-        json.dumps(probs, ensure_ascii=False, indent=2), encoding="utf-8"
-    )
-    (outdir / "report.json").write_text(
-        json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8"
-    )
+def _log_sweep(log: Any, report: dict[str, Any]) -> None:
+    """Print the curve, the rule baseline and the two summary statistics."""
     rule = report.get("rule")
     if rule is not None:
         log.info(
@@ -1168,6 +1079,22 @@ def cmd_verify_sweep(args: argparse.Namespace) -> int:
             f"误杀={'—' if ffr is None else f'{ffr:.1%}'} "
             f"弃权={'—' if cvr is None else f'{cvr:.1%}'}"
         )
+    metrics = report.get("metrics") or {}
+    separation = metrics.get("separation") or {}
+    degeneracy = metrics.get("degeneracy") or {}
+    if separation.get("auc") is not None:
+        log.info(f"  可分性 AUC={separation['auc']:.3f}（0.5 = 没有阈值能分开）")
+    if degeneracy.get("extreme_share") is not None:
+        log.info(
+            f"  退化：{degeneracy['at_extremes']}/{degeneracy['decided']} 条落在 0.00 或 1.00"
+            f"（{degeneracy['extreme_share']:.1%}），弃权 {degeneracy['abstained']} 条"
+        )
+    versus = metrics.get("judge_vs_rule")
+    if versus is not None:
+        log.info(
+            f"  相对规则：一致 {versus['agreement']:.1%}"
+            f"（判断者多判 {versus['judge_only_decided']}，规则多判 {versus['rule_only_decided']}）"
+        )
     chosen = gate_sweep.operating_point(report)
     if chosen is None:
         log.error("no threshold reaches zero false passes: this gate needs the rule layer")
@@ -1176,6 +1103,140 @@ def cmd_verify_sweep(args: argparse.Namespace) -> int:
             f"推荐工作点：t={chosen['threshold']:.2f} "
             f"(漏检={chosen['false_pass_rate']:.1%}, 误杀={chosen['false_fail_rate']:.1%})"
         )
+
+
+def cmd_verify_sweep(args: argparse.Namespace) -> int:
+    """Plan A: score a per-evidence probability gate across thresholds.
+
+    Separate from `verify eval` on purpose. That command compares matchers that
+    already decided; this one decides *where the boundary should be*, which is
+    the extra step a probability gate buys. The judge proposes a number and the
+    threshold is swept in application code, so the model never sees a label.
+    """
+    log = console()
+    thresholds = gate_sweep.parse_thresholds(args.thresholds)
+    if not thresholds:
+        log.error(f"no thresholds parsed from {args.thresholds!r}")
+        return EXIT_FAIL
+
+    if args.reuse:
+        # Free re-analysis: the judge calls are already in the saved report, so
+        # the curve can be redrawn at other thresholds without paying again.
+        source = Path(args.reuse)
+        if not source.is_file():
+            log.error(f"no report to reuse: {source}")
+            return EXIT_FAIL
+        previous = json.loads(source.read_text(encoding="utf-8"))
+        corpus, probs = gate_sweep.corpus_from_report(previous)
+        criterion = previous.get("criterion", args.criterion)
+        log.info(
+            f"reusing {source}: {len(corpus['samples'])} samples, "
+            f"judge={previous.get('judge')!r} (no model calls this run)"
+        )
+        report = gate_sweep.sweep(
+            corpus,
+            probs,
+            thresholds=thresholds,
+            band=args.band,
+            judge_name=str(previous.get("judge") or "judge"),
+            question=str(previous.get("question") or gate_sweep.DEFAULT_QUESTION),
+            blind=bool(previous.get("blind")),
+            usage=previous.get("usage"),
+            rule_probs=gate_sweep.rule_probabilities(criterion, corpus),
+        )
+        report["criterion"] = criterion
+        report["reused_from"] = str(source)
+        outdir = Path(args.out) if args.out else source.parent
+        stamp = f"{dt.datetime.now():%Y%m%d-%H%M%S}"
+        (outdir / f"report-{stamp}.md").write_text(gate_sweep.markdown(report), encoding="utf-8")
+        (outdir / f"report-{stamp}.json").write_text(
+            json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8"
+        )
+        _log_sweep(log, report)
+        log.info(f"report: {outdir / f'report-{stamp}.md'}")
+        return EXIT_OK
+
+    if not args.allow_llm:
+        log.error("verify sweep runs a paid model judge; pass --allow-llm to enable it")
+        return EXIT_FAIL
+
+    if args.criterion == "scope":
+        repo = args.repo or os.environ.get("AGENT_REPO_ROOT") or Path.cwd()
+        corpus = gate_sweep.build_scope_corpus(repo, limit=args.commits, max_per_kind=args.per_kind)
+        if not corpus["samples"]:
+            log.error(f"no commits to build a scope corpus from in {repo}")
+            return EXIT_FAIL
+        log.info(f"scope corpus: {len(corpus['samples'])} samples from {repo}")
+        rule_probs = gate_sweep.rule_probabilities("scope", corpus)
+    else:
+        corpus_path = Path(args.corpus) if args.corpus else verification_eval.default_corpus_path()
+        if corpus_path.is_file():
+            corpus = verification_eval.load_corpus(corpus_path)
+            log.info(f"corpus: {corpus_path} ({len(corpus.get('samples', []))} samples)")
+        else:
+            days = args.days or verification_eval.available_days()
+            if not days:
+                log.error("no corpus and no captures to build one from")
+                return EXIT_FAIL
+            corpus = verification_eval.build_corpus(days)
+            verification_eval.save_corpus(corpus_path, corpus)
+            log.info(f"corpus: built {len(corpus['samples'])} samples -> {corpus_path}")
+        before = len(corpus.get("samples", []))
+        if args.per_kind:
+            corpus = verification_eval.subsample(corpus, args.per_kind)
+        if len(corpus.get("samples", [])) != before:
+            log.info(f"judge budget: {len(corpus['samples'])}/{before} samples")
+        # The free typed gate, expressed on the same 0/1 scale, so the report can
+        # answer "did the paid judge say anything the rule did not?"
+        rule_probs = gate_sweep.rule_probabilities("citation", corpus)
+
+    agent_config = config_mod.load()
+    provider = get_provider(agent_config)
+    ok, detail = provider.available()
+    if not ok:
+        log.error(f"judge unavailable: {detail}")
+        return EXIT_FAIL
+
+    def _progress(done: int, total: int) -> None:
+        if done == total or done % 10 == 0:
+            log.info(f"  judging {done}/{total}")
+
+    if args.criterion == "scope":
+        judge = gate_sweep.scope_probability_judge(provider, lossy=args.blind)
+        probs = gate_sweep.scope_probabilities(corpus, judge, progress=_progress)
+    else:
+        judge = gate_sweep.probability_judge(provider, blind=args.blind)
+        probs = gate_sweep.probabilities(corpus, judge, progress=_progress)
+    report = gate_sweep.sweep(
+        corpus,
+        probs,
+        thresholds=thresholds,
+        band=args.band,
+        judge_name=provider.name,
+        question=getattr(judge, "question", gate_sweep.DEFAULT_QUESTION),
+        blind=args.blind,
+        usage=getattr(judge, "usage", None),
+        rule_probs=rule_probs,
+    )
+    report["criterion"] = args.criterion
+    outdir = (
+        Path(args.out)
+        if args.out
+        else paths.runs_dir()
+        / "verification"
+        / f"gate-sweep-{args.criterion}-{dt.datetime.now():%Y%m%d-%H%M%S}"
+    )
+    outdir.mkdir(parents=True, exist_ok=True)
+    (outdir / "report.md").write_text(gate_sweep.markdown(report), encoding="utf-8")
+    # The judge calls are the expensive part; keep them so the curve can be
+    # re-drawn at other thresholds for free.
+    (outdir / "probabilities.json").write_text(
+        json.dumps(probs, ensure_ascii=False, indent=2), encoding="utf-8"
+    )
+    (outdir / "report.json").write_text(
+        json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8"
+    )
+    _log_sweep(log, report)
     log.info(f"report: {outdir / 'report.md'}")
     return EXIT_OK
 

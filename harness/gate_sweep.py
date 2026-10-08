@@ -292,12 +292,13 @@ def sweep(
     question: str = DEFAULT_QUESTION,
     blind: bool = False,
     usage: dict[str, Any] | None = None,
+    rule_probs: dict[str, float | None] | None = None,
 ) -> dict[str, Any]:
     points = [
         score_at(corpus, probs, threshold=float(t), band=band)
         for t in thresholds
     ]
-    return {
+    report: dict[str, Any] = {
         "generated_at": dt.datetime.now().astimezone().isoformat(timespec="seconds"),
         "judge": judge_name,
         "question": question,
@@ -306,9 +307,28 @@ def sweep(
         "days": corpus.get("days", []),
         "samples": len(corpus.get("samples", [])),
         "corpus_fingerprint": ve.corpus_fingerprint(corpus),
+        # Kept so `--reuse` can re-score the saved probabilities without the
+        # original corpus or another model call. Small: a sweep always runs on a
+        # budgeted subsample, not the full corpus.
+        "corpus": corpus,
         "usage": usage,
         "points": points,
     }
+    report["metrics"] = {
+        "separation": separation_auc(corpus, probs),
+        "degeneracy": degeneracy_stats(probs),
+    }
+    best = best_point(report)
+    if best is not None:
+        report["metrics"]["best_point"] = {
+            "threshold": best["threshold"],
+            "false_pass_rate": best["false_pass_rate"],
+            "false_fail_rate": best["false_fail_rate"],
+        }
+    if rule_probs is not None:
+        report["rule"] = score_at(corpus, rule_probs, threshold=0.5)
+        report["metrics"]["judge_vs_rule"] = rule_agreement(corpus, probs, rule_probs)
+    return report
 
 
 def operating_point(report: dict[str, Any], *, max_false_fail: float | None = None) -> dict[str, Any] | None:
@@ -326,6 +346,138 @@ def operating_point(report: dict[str, Any], *, max_false_fail: float | None = No
     if not clean:
         return None
     return min(clean, key=lambda point: point["threshold"])
+
+
+def separation_auc(corpus: dict[str, Any], probs: dict[str, float | None]) -> dict[str, Any]:
+    """Can *any* threshold separate the two classes?
+
+    The sweep shows how one threshold behaves. This shows whether the ranking
+    behind it carries signal at all: 1.0 means perfectly separable, 0.5 means
+    the probabilities are noise and no threshold can work, below 0.5 means the
+    judge points the wrong way. Rank-based (Mann-Whitney), ties counted as half.
+
+    Abstentions are excluded: refusing to answer is not a ranking.
+    """
+    pos: list[float] = []
+    neg: list[float] = []
+    for sample in corpus.get("samples", []):
+        probability = probs.get(sample["sample_id"])
+        if probability is None:
+            continue
+        (pos if sample["expect"] == ve.EXPECT_PASS else neg).append(float(probability))
+    if not pos or not neg:
+        return {"auc": None, "legit_decided": len(pos), "attack_decided": len(neg)}
+    wins = sum(1 for a in pos for b in neg if a > b)
+    ties = sum(1 for a in pos for b in neg if a == b)
+    auc = (wins + 0.5 * ties) / (len(pos) * len(neg))
+    return {
+        "auc": round(auc, 4),
+        "legit_decided": len(pos),
+        "attack_decided": len(neg),
+    }
+
+
+def degeneracy_stats(probs: dict[str, float | None]) -> dict[str, Any]:
+    """How much of the judge's output is a hard verdict wearing a number.
+
+    A judge that only ever says 0 or 100 technically returns probabilities, but
+    the threshold has nothing to slide along. This measures how often that
+    happens so "the sweep is a flat line" becomes a number rather than a shape
+    someone has to notice.
+    """
+    values = list(probs.values())
+    decided = [p for p in values if p is not None]
+    extremes = sum(1 for p in decided if p in (0.0, 1.0))
+    return {
+        "decided": len(decided),
+        "abstained": len(values) - len(decided),
+        "at_extremes": extremes,
+        "extreme_share": round(extremes / len(decided), 4) if decided else None,
+    }
+
+
+def best_point(report: dict[str, Any]) -> dict[str, Any] | None:
+    """The most favourable threshold on the curve, by Youden's J.
+
+    Reported next to the honest operating point on purpose: the gap between
+    "the best you could possibly do" and "the best you can do without leaking"
+    is the price of the criterion, not of this particular threshold.
+    """
+    scored: list[tuple[float, dict[str, Any]]] = []
+    for point in report.get("points", []):
+        fpr, ffr = point.get("false_pass_rate"), point.get("false_fail_rate")
+        if fpr is None or ffr is None:
+            continue
+        scored.append(((1.0 - ffr) - fpr, point))
+    if not scored:
+        return None
+    return max(scored, key=lambda pair: pair[0])[1]
+
+
+def rule_agreement(
+    corpus: dict[str, Any],
+    probs: dict[str, float | None],
+    rule_probs: dict[str, float | None],
+    *,
+    threshold: float = 0.5,
+) -> dict[str, Any]:
+    """Does the paid judge say anything the free rule does not?
+
+    Agreement near 1.0 with the rule means the judge is a more expensive way to
+    compute a rule. The counts separate the two directions of disagreement so
+    an aggregate number cannot hide which one is happening.
+    """
+    agree = judge_only = rule_only = 0
+    for sample in corpus.get("samples", []):
+        judge = verdict_for(probs.get(sample["sample_id"]), threshold)
+        rule = verdict_for(rule_probs.get(sample["sample_id"]), threshold)
+        if judge == rule:
+            agree += 1
+        elif rule == Decision.CANNOT_VERIFY.value:
+            judge_only += 1
+        else:
+            rule_only += 1
+    total = agree + judge_only + rule_only
+    return {
+        "threshold": round(threshold, 4),
+        "agree": agree,
+        "judge_only_decided": judge_only,
+        "rule_only_decided": rule_only,
+        "agreement": round(agree / total, 4) if total else None,
+    }
+
+
+def corpus_from_report(report: dict[str, Any]) -> tuple[dict[str, Any], dict[str, float | None]]:
+    """Recover (corpus, probabilities) from a saved report.
+
+    Every point stores a verdict per sample, so the expensive judge calls can be
+    re-scored at other thresholds without paying again. Nothing here calls a
+    model.
+    """
+    points = report.get("points") or []
+    if not points:
+        raise HarnessError("report has no points to reuse")
+    verdicts = points[0].get("verdicts") or []
+    saved = report.get("corpus") or {}
+    saved_samples = saved.get("samples") or []
+    if saved_samples:
+        # Preferred: the full sample metadata (needed to rebuild the rule
+        # baseline for the scope criterion, which reads declared/changed).
+        probs = {row["sample_id"]: row.get("probability") for row in verdicts}
+        return {"days": saved.get("days", report.get("days", [])), "samples": saved_samples}, probs
+    samples = [
+        {
+            "sample_id": row["sample_id"],
+            "kind": row["kind"],
+            "expect": row["expect"],
+            "day": "",
+            "url": "",
+            "note": "",
+        }
+        for row in verdicts
+    ]
+    probs = {row["sample_id"]: row.get("probability") for row in verdicts}
+    return {"days": report.get("days", []), "samples": samples}, probs
 
 
 def markdown(report: dict[str, Any]) -> str:
@@ -346,6 +498,42 @@ def markdown(report: dict[str, Any]) -> str:
         f"- 裁判：{report.get('judge')} · 调用 {usage.get('calls', 0)} 次 · 弃权 {usage.get('abstentions', 0)} 次 · 成本 {cost}",
         f"- 语料：{report.get('samples')} 条（{', '.join(report.get('days', [])) or '（无）'}），指纹 {report.get('corpus_fingerprint')}",
         f"- 弃权带：{report.get('band')}",
+    ]
+    metrics = report.get("metrics") or {}
+    separation = metrics.get("separation") or {}
+    degeneracy = metrics.get("degeneracy") or {}
+    auc = separation.get("auc")
+    if auc is not None:
+        if auc >= 0.99:
+            read = "完全可分：简单规则通常也能做到，先问值不值得付费"
+        elif auc >= 0.8:
+            read = "可分：留出空间给阈值"
+        elif auc >= 0.6:
+            read = "弱可分：任何阈值都会漏或误杀"
+        else:
+            read = "不可分：概率是噪声，没有阈值能同时不漏不误杀"
+        lines.append(
+            f"- 可分性 AUC：**{auc:.3f}**（合规 {separation.get('legit_decided')} / 越界 "
+            f"{separation.get('attack_decided')} 条参与）—— {read}"
+        )
+    if degeneracy.get("extreme_share") is not None:
+        lines.append(
+            f"- 退化程度：{degeneracy['at_extremes']}/{degeneracy['decided']} 条判决落在 0.00 或 1.00"
+            f"（{degeneracy['extreme_share']:.1%}），弃权 {degeneracy['abstained']} 条"
+        )
+    best = metrics.get("best_point")
+    if best is not None:
+        lines.append(
+            f"- 曲线上最宽松的一点：t={best['threshold']:.2f} "
+            f"漏检 {best['false_pass_rate']:.1%} / 误杀 {best['false_fail_rate']:.1%}"
+        )
+    versus = metrics.get("judge_vs_rule")
+    if versus is not None:
+        lines.append(
+            f"- 相对规则：一致 {versus['agreement']:.1%}"
+            f"（判断者多判 {versus['judge_only_decided']} 条、规则多判 {versus['rule_only_decided']} 条）"
+        )
+    lines += [
         "",
         "| 阈值 | 漏检率 (false pass) | 误杀率 (false fail) | 弃权 | 漏检/攻击 |",
         "| --- | --- | --- | --- | --- |",
@@ -635,6 +823,50 @@ def scope_rule_probabilities(corpus: dict[str, Any]) -> dict[str, float | None]:
     }
 
 
+def citation_rule_probabilities(
+    corpus: dict[str, Any], *, root: Any | None = None
+) -> dict[str, float | None]:
+    """The deterministic citation gate expressed on the same 0/1 scale.
+
+    PASS maps to 1.0 and FAIL to 0.0 so it can be compared with the judge through
+    one code path. CANNOT_VERIFY stays ``None`` -- the rule is not allowed to
+    guess either.
+    """
+    known_cache: dict[str, set[str]] = {}
+    out: dict[str, float | None] = {}
+    for sample in corpus.get("samples", []):
+        day = sample["day"]
+        if day not in known_cache:
+            known_cache[day] = ve._raw_urls(day, root=root)
+        decision = ve.typed_matcher(sample["url"], known_cache[day])
+        if decision == Decision.PASS.value:
+            out[sample["sample_id"]] = 1.0
+        elif decision == Decision.FAIL.value:
+            out[sample["sample_id"]] = 0.0
+        else:
+            out[sample["sample_id"]] = None
+    return out
+
+
+def rule_probabilities(
+    criterion: str, corpus: dict[str, Any], *, root: Any | None = None
+) -> dict[str, float | None] | None:
+    """The free baseline for a criterion, or ``None`` when it cannot be built.
+
+    ``None`` is a real answer, not a failure: a report reused from before this
+    field existed carries only what the judge saw, and inventing a rule baseline
+    for it would be worse than saying "not comparable".
+    """
+    samples = corpus.get("samples") or []
+    if criterion == "scope":
+        if not samples or not all("declared" in s and "changed" in s for s in samples):
+            return None
+        return scope_rule_probabilities(corpus)
+    if not samples or not all("url" in s and "day" in s for s in samples):
+        return None
+    return citation_rule_probabilities(corpus, root=root)
+
+
 __all__ = [
     "ABSTAIN",
     "DEFAULT_QUESTION",
@@ -642,8 +874,15 @@ __all__ = [
     "SCOPE_QUESTION",
     "areas_of",
     "build_scope_corpus",
+    "citation_rule_probabilities",
     "commits_in",
+    "corpus_from_report",
+    "best_point",
+    "degeneracy_stats",
     "in_scope",
+    "rule_probabilities",
+    "rule_agreement",
+    "separation_auc",
     "markdown",
     "operating_point",
     "parse_thresholds",

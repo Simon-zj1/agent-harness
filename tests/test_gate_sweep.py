@@ -176,6 +176,85 @@ class ProbabilityJudgeTest(unittest.TestCase):
         self.assertEqual(judge.usage["abstentions"], 1)
 
 
+class SeparationTest(unittest.TestCase):
+    def test_perfect_separation_is_one(self) -> None:
+        probs = {"a": 0.9, "b": 0.8, "c": 0.1, "d": 0.2}
+        self.assertEqual(gs.separation_auc(_corpus(), probs)["auc"], 1.0)
+
+    def test_all_ties_is_chance(self) -> None:
+        probs = {"a": 0.5, "b": 0.5, "c": 0.5, "d": 0.5}
+        self.assertEqual(gs.separation_auc(_corpus(), probs)["auc"], 0.5)
+
+    def test_abstentions_are_not_a_ranking(self) -> None:
+        probs = {"a": 0.9, "b": None, "c": 0.1, "d": None}
+        metrics = gs.separation_auc(_corpus(), probs)
+        self.assertEqual(metrics["legit_decided"], 1)
+        self.assertEqual(metrics["attack_decided"], 1)
+
+    def test_none_when_one_class_never_decided(self) -> None:
+        probs = {"a": 0.9, "b": 0.8, "c": None, "d": None}
+        self.assertIsNone(gs.separation_auc(_corpus(), probs)["auc"])
+
+    def test_degeneracy_counts_the_extremes(self) -> None:
+        metrics = gs.degeneracy_stats({"a": 1.0, "b": 0.0, "c": 0.4, "d": None})
+        self.assertEqual(metrics["decided"], 3)
+        self.assertEqual(metrics["at_extremes"], 2)
+        self.assertEqual(metrics["abstained"], 1)
+        self.assertEqual(metrics["extreme_share"], 0.6667)
+
+    def test_best_point_maximises_youden(self) -> None:
+        probs = {"a": 0.9, "b": 0.8, "c": 0.4, "d": 0.3}
+        report = gs.sweep(_corpus(), probs, thresholds=[0.1, 0.5, 0.85])
+        # t=0.1 leaks both attacks (J=-1); t=0.85 blocks legit "b" (J=0.5).
+        self.assertEqual(gs.best_point(report)["threshold"], 0.5)
+
+    def test_rule_agreement_is_one_when_identical(self) -> None:
+        probs = {"a": 0.9, "b": 0.8, "c": 0.4, "d": 0.3}
+        rule = {"a": 1.0, "b": 1.0, "c": 0.0, "d": 0.0}
+        self.assertEqual(gs.rule_agreement(_corpus(), probs, rule)["agreement"], 1.0)
+
+    def test_rule_agreement_names_the_disagreeing_side(self) -> None:
+        probs = {"a": 0.9, "b": 0.8, "c": 0.4, "d": 0.3}
+        rule = {"a": 1.0, "b": 1.0, "c": 1.0, "d": 0.0}  # the rule passes attack "c"
+        metrics = gs.rule_agreement(_corpus(), probs, rule)
+        self.assertLess(metrics["agreement"], 1.0)
+        self.assertEqual(metrics["rule_only_decided"], 1)
+
+
+class ReuseTest(unittest.TestCase):
+    def _scope_samples(self) -> list[dict]:
+        return gs.samples_from_commits(
+            [{"sha": "a" * 40, "subject": "two areas", "files": ["harness/a.py", "tests/b.py"]}]
+        )
+
+    def test_report_round_trips_the_corpus(self) -> None:
+        corpus = {"days": ["t"], "samples": self._scope_samples()}
+        probs = {s["sample_id"]: 1.0 for s in corpus["samples"]}
+        report = gs.sweep(corpus, probs, thresholds=[0.5])
+        recovered, recovered_probs = gs.corpus_from_report(report)
+        # The metadata the rule baseline needs must survive the round trip.
+        self.assertTrue(all("declared" in s and "changed" in s for s in recovered["samples"]))
+        self.assertEqual(set(recovered_probs), set(probs))
+
+    def test_reuse_without_corpus_still_returns_probabilities(self) -> None:
+        corpus = {"days": ["t"], "samples": self._scope_samples()}
+        probs = {s["sample_id"]: 0.5 for s in corpus["samples"]}
+        report = gs.sweep(corpus, probs, thresholds=[0.5])
+        report.pop("corpus")  # emulate a report written before this field existed
+        recovered, recovered_probs = gs.corpus_from_report(report)
+        self.assertEqual(len(recovered["samples"]), len(probs))
+        self.assertEqual(recovered_probs, probs)
+
+    def test_rule_baseline_refuses_when_metadata_is_missing(self) -> None:
+        thin = {"days": ["t"], "samples": [{"sample_id": "x", "kind": "legit", "expect": "pass"}]}
+        self.assertIsNone(gs.rule_probabilities("scope", thin))
+        self.assertIsNone(gs.rule_probabilities("citation", thin))
+
+    def test_rule_baseline_available_for_a_scope_corpus(self) -> None:
+        corpus = {"days": ["t"], "samples": self._scope_samples()}
+        self.assertIsNotNone(gs.rule_probabilities("scope", corpus))
+
+
 class AreasAndScopeTest(unittest.TestCase):
     def test_areas_are_top_level_and_deduped(self) -> None:
         files = ["harness/cli.py", "harness/gate_sweep.py", "tests/test_x.py"]
