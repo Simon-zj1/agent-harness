@@ -609,6 +609,10 @@ def content_debt_markdown(report: dict[str, Any]) -> str:
         "  （编造风险更高）。这两种问题要分开修。",
         "- 可核验率下降有两种原因，需要分开看：引用确实不在当天抓取里，或当天的抓取文件",
         "  被后续运行覆盖过（`fetch` 曾经在 dry-run 下也执行）。后者属于可复现性事故。",
+        "- `规则弃权` 是确定性规则**拒绝表态**的条数，也就是「换一个模型来担保」最多能补的",
+        "  上限——不是收益。只有当弃权落在**合规**引用上时，被误挡的发布才是真代价；",
+        "  落在攻击样本上时 fail-closed 已经处理正确。要判断值不值得加模型门，跑",
+        "  `./agent verify sweep`，结论由 `gate_sweep.recommendation()` 给（AGENTS.md 第 15 条）。",
         "",
     ]
     return "\n".join(lines)

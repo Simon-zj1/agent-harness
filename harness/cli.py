@@ -923,9 +923,16 @@ def cmd_verify_release(args: argparse.Namespace) -> int:
     for row in report["rows"]:
         mark = "ok  " if row["clean"] else "FAIL"
         extra = " raw缺失" if row.get("raw_missing") else ""
+        # `cannot_verify` 是免费的那半：规则拒绝表态的条数，也就是模型门**最多**
+        # 能补的上限。落在合规样本上才是真的被误挡；落在攻击样本上 fail-closed
+        # 已经处理正确（见 AGENTS.md 第 15 条）。
+        abstained = row.get("cannot_verify")
+        abstain_text = (
+            f"  规则弃权={abstained}" if abstained else ""
+        )
         log.info(
             f"  {mark} {row['day']}  blockers={','.join(row['blockers']) or '-'}  "
-            f"ratio={row['verifiable_ratio']}{extra}"
+            f"ratio={row['verifiable_ratio']}{extra}{abstain_text}"
         )
 
     # 尺度：破坏页面/结构的问题拦发布；引用「来自别的某天」是产线用了陈旧素材，
