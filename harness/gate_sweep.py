@@ -328,6 +328,7 @@ def sweep(
     if rule_probs is not None:
         report["rule"] = score_at(corpus, rule_probs, threshold=0.5)
         report["metrics"]["judge_vs_rule"] = rule_agreement(corpus, probs, rule_probs)
+    report["recommendation"] = recommendation(report)
     return report
 
 
@@ -447,6 +448,105 @@ def rule_agreement(
     }
 
 
+def cost_profile(point: dict[str, Any]) -> dict[str, int]:
+    """What a gate's verdicts cost, counted the way the policy prices them.
+
+    Leaking an attack and wrongly blocking real work are not the same size of
+    mistake, and an abstention only costs anything when it lands on real work --
+    under fail-closed, abstaining on an attack is already the right answer.
+    Counting `cannot_verify` without that split is what made "the judge decides
+    16 more cases" look like an improvement when the rule had already handled
+    all 16 correctly.
+    """
+    tally = {"leak": 0, "legit_fail": 0, "legit_abstain": 0, "attack_abstain": 0, "decided": 0}
+    for row in point.get("verdicts", []):
+        expect, verdict = row.get("expect"), row.get("verdict")
+        if verdict != Decision.CANNOT_VERIFY.value:
+            tally["decided"] += 1
+        if expect == ve.EXPECT_NOT_PASS and verdict == Decision.PASS.value:
+            tally["leak"] += 1
+        if expect == ve.EXPECT_PASS and verdict == Decision.FAIL.value:
+            tally["legit_fail"] += 1
+        if expect == ve.EXPECT_PASS and verdict == Decision.CANNOT_VERIFY.value:
+            tally["legit_abstain"] += 1
+        if expect == ve.EXPECT_NOT_PASS and verdict == Decision.CANNOT_VERIFY.value:
+            tally["attack_abstain"] += 1
+    return tally
+
+
+def _wrongness(cost: dict[str, int]) -> tuple[int, int]:
+    """(leaks, blocked real work). The first is the costly direction."""
+    return cost["leak"], cost["legit_fail"] + cost["legit_abstain"]
+
+
+def recommendation(report: dict[str, Any]) -> dict[str, Any]:
+    """Turn the measurement into the decision it was run for: model or rule?
+
+    Not "how accurate is the judge" but "should this gate be a model at all".
+    The comparison is made at each side's honest point -- the judge at its
+    lowest leak-free threshold, never at one picked after seeing the labels --
+    and it weighs leaks against *blocked real work*, not against raw verdict
+    counts.
+    """
+    metrics = report.get("metrics") or {}
+    separation = metrics.get("separation") or {}
+    degeneracy = metrics.get("degeneracy") or {}
+    rule = report.get("rule")
+    auc = separation.get("auc")
+
+    if rule is None:
+        return {
+            "verdict": "no_rule_baseline",
+            "reasons": ["没有规则基线，主结论只能是「这条门准不准」，不是「该不该用模型」"],
+            "auc": auc,
+        }
+
+    clean = operating_point(report)
+    judge_point = clean if clean is not None else best_point(report)
+    if judge_point is None:
+        return {"verdict": "no_point", "reasons": ["曲线为空"], "auc": auc}
+
+    judge_cost = cost_profile(judge_point)
+    rule_cost = cost_profile(rule)
+    reasons: list[str] = [
+        f"模型取 {'最低零漏检阈值' if clean is not None else '曲线最宽松点'} "
+        f"t={judge_point['threshold']:.2f}；规则取 t=0.50"
+    ]
+
+    if auc is not None and auc < 0.6:
+        reasons.append(f"可分性 AUC={auc:.3f}：没有任何阈值能分开两类")
+        verdict = "unusable"
+    else:
+        j_leak, j_block = _wrongness(judge_cost)
+        r_leak, r_block = _wrongness(rule_cost)
+        if (j_leak, j_block) < (r_leak, r_block):
+            verdict = "judge_wins"
+            reasons.append(f"模型 漏检 {j_leak} / 挡住真活 {j_block}，规则 {r_leak} / {r_block}")
+        elif (r_leak, r_block) < (j_leak, j_block):
+            verdict = "rule_wins"
+            reasons.append(f"规则 漏检 {r_leak} / 挡住真活 {r_block}，模型 {j_leak} / {j_block}")
+        else:
+            verdict = "rule_wins"
+            reasons.append(f"两者同错（漏检 {j_leak} / 挡住真活 {j_block}），规则免费且可复现")
+
+    if degeneracy.get("extreme_share") is not None and degeneracy["extreme_share"] >= 0.95:
+        reasons.append(
+            f"模型 {degeneracy['extreme_share']:.1%} 的判决落在 0.00/1.00，阈值几乎没有可调空间"
+        )
+    if rule_cost["attack_abstain"] and not rule_cost["legit_abstain"]:
+        reasons.append(
+            f"规则弃权的 {rule_cost['attack_abstain']} 条全落在攻击样本上，fail-closed 已经处理正确"
+        )
+    return {
+        "verdict": verdict,
+        "reasons": reasons,
+        "auc": auc,
+        "judge_threshold": judge_point["threshold"],
+        "judge_cost": judge_cost,
+        "rule_cost": rule_cost,
+    }
+
+
 def corpus_from_report(report: dict[str, Any]) -> tuple[dict[str, Any], dict[str, float | None]]:
     """Recover (corpus, probabilities) from a saved report.
 
@@ -559,6 +659,18 @@ def markdown(report: dict[str, Any]) -> str:
             else "**没有阈值能做到零漏检** —— 这条门单独用不够，需要规则兜底。"
         ),
     ]
+    advice = report.get("recommendation") or {}
+    if advice:
+        label = {
+            "rule_wins": "结论：**用规则，不要用模型门**",
+            "judge_wins": "结论：**这回模型门赢**",
+            "unusable": "结论：**这条门不可用**（概率是噪声）",
+            "no_rule_baseline": "结论：**没有规则基线，只能答「准不准」**",
+        }.get(advice.get("verdict"), f"结论：{advice.get('verdict')}")
+        lines.append("")
+        lines.append(label)
+        for reason in advice.get("reasons", []):
+            lines.append(f"- {reason}")
     return "\n".join(lines) + "\n"
 
 
@@ -878,8 +990,10 @@ __all__ = [
     "commits_in",
     "corpus_from_report",
     "best_point",
+    "cost_profile",
     "degeneracy_stats",
     "in_scope",
+    "recommendation",
     "rule_probabilities",
     "rule_agreement",
     "separation_auc",

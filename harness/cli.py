@@ -1103,6 +1103,11 @@ def _log_sweep(log: Any, report: dict[str, Any]) -> None:
             f"推荐工作点：t={chosen['threshold']:.2f} "
             f"(漏检={chosen['false_pass_rate']:.1%}, 误杀={chosen['false_fail_rate']:.1%})"
         )
+    advice = report.get("recommendation") or {}
+    if advice:
+        log.info(f"结论：{advice.get('verdict')}")
+        for reason in advice.get("reasons", []):
+            log.info(f"  · {reason}")
 
 
 def cmd_verify_sweep(args: argparse.Namespace) -> int:

@@ -222,6 +222,8 @@ class SeparationTest(unittest.TestCase):
 
 
 class ReuseTest(unittest.TestCase):
+    """Reuse is free, so it must never silently invent a rule baseline."""
+
     def _scope_samples(self) -> list[dict]:
         return gs.samples_from_commits(
             [{"sha": "a" * 40, "subject": "two areas", "files": ["harness/a.py", "tests/b.py"]}]
@@ -322,6 +324,73 @@ class SamplesFromCommitsTest(unittest.TestCase):
         # The deterministic rule defines the labels, so it must be perfect.
         self.assertEqual(point["false_pass_count"], 0)
         self.assertEqual(point["false_fail_count"], 0)
+
+
+class CostProfileTest(unittest.TestCase):
+    def _point(self, rows: list[tuple[str, str, str]]) -> dict:
+        return {
+            "verdicts": [
+                {"sample_id": f"s{i}", "kind": kind, "expect": expect, "verdict": verdict}
+                for i, (kind, expect, verdict) in enumerate(rows)
+            ]
+        }
+
+    def test_costs_are_split_by_expectation(self) -> None:
+        point = self._point(
+            [
+                ("legit", "pass", "pass"),
+                ("legit", "pass", "fail"),
+                ("legit", "pass", "cannot_verify"),
+                ("attack", "not_pass", "pass"),
+                ("attack", "not_pass", "cannot_verify"),
+            ]
+        )
+        cost = gs.cost_profile(point)
+        self.assertEqual(cost["leak"], 1)
+        self.assertEqual(cost["legit_fail"], 1)
+        self.assertEqual(cost["legit_abstain"], 1)
+        self.assertEqual(cost["attack_abstain"], 1)
+        self.assertEqual(cost["decided"], 3)
+
+    def test_abstaining_on_an_attack_is_not_a_cost(self) -> None:
+        # Fail-closed blocks it anyway, so it must not be counted as wrong.
+        point = self._point([("attack", "not_pass", "cannot_verify")])
+        self.assertEqual(gs.cost_profile(point)["legit_abstain"], 0)
+
+
+class RecommendationTest(unittest.TestCase):
+    #: Attacks sit below every threshold tried, so the judge can be leak-free.
+    _JUDGE_OK = {"a": 0.9, "b": 0.8, "c": 0.01, "d": 0.02}
+    _RULE_OK = {"a": 1.0, "b": 1.0, "c": 0.0, "d": 0.0}
+    _THRESHOLDS = [0.05, 0.5, 0.9]
+
+    def _report(self, judge: dict, rule: dict | None) -> dict:
+        return gs.sweep(_corpus(), judge, thresholds=self._THRESHOLDS, rule_probs=rule)
+
+    def test_rule_wins_when_neither_is_wrong(self) -> None:
+        # Equal errors, so the free and reproducible gate is the one to keep.
+        report = self._report(self._JUDGE_OK, self._RULE_OK)
+        self.assertEqual(report["recommendation"]["verdict"], "rule_wins")
+
+    def test_judge_wins_when_the_rule_blocks_real_work(self) -> None:
+        # The rule abstains on both legitimate items: fail-closed turns that into
+        # two blocked publishes. The judge decides them and still leaks nothing.
+        rule = {"a": None, "b": None, "c": 0.0, "d": 0.0}
+        report = self._report(self._JUDGE_OK, rule)
+        self.assertEqual(report["recommendation"]["verdict"], "judge_wins")
+
+    def test_unusable_when_the_ranking_is_noise(self) -> None:
+        flat = {"a": 0.5, "b": 0.5, "c": 0.5, "d": 0.5}
+        report = self._report(flat, self._RULE_OK)
+        self.assertEqual(report["recommendation"]["verdict"], "unusable")
+
+    def test_missing_baseline_is_named_not_guessed(self) -> None:
+        report = self._report(self._JUDGE_OK, None)
+        self.assertEqual(report["recommendation"]["verdict"], "no_rule_baseline")
+
+    def test_markdown_states_the_verdict(self) -> None:
+        text = gs.markdown(self._report(self._JUDGE_OK, self._RULE_OK))
+        self.assertIn("用规则，不要用模型门", text)
 
 
 if __name__ == "__main__":
