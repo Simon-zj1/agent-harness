@@ -13,6 +13,7 @@ from pathlib import Path
 from . import (
     __version__,
     config as config_mod,
+    gate_sweep,
     launchd,
     memory,
     paths,
@@ -222,6 +223,60 @@ def build_parser() -> argparse.ArgumentParser:
         help="freeze this run as the regression baseline instead of comparing against it",
     )
     v_eval.set_defaults(_handler=cmd_verify_eval)
+    v_sweep = ver_sub.add_parser(
+        "sweep",
+        help="Plan A: score a probability gate across thresholds (needs a model judge)",
+    )
+    v_sweep.add_argument("--corpus", help="corpus.json (built on the fly when missing)")
+    v_sweep.add_argument(
+        "--criterion",
+        choices=("citation", "scope"),
+        default="citation",
+        help="citation: is this URL genuine evidence; scope: is this change inside its declared scope",
+    )
+    v_sweep.add_argument(
+        "--repo",
+        default=None,
+        help="repo to read commits from for --criterion scope (default: this repo)",
+    )
+    v_sweep.add_argument(
+        "--commits",
+        type=int,
+        default=120,
+        help="how many recent commits --criterion scope reads",
+    )
+    v_sweep.add_argument(
+        "--days",
+        action="append",
+        default=None,
+        help="YYYY-MM-DD (repeatable); only used when no corpus is found",
+    )
+    v_sweep.add_argument("--allow-llm", action="store_true", help="required: this runs a paid judge")
+    v_sweep.add_argument(
+        "--per-kind",
+        type=int,
+        default=6,
+        help="cap samples per kind per day sent to the judge (0 = no cap)",
+    )
+    v_sweep.add_argument(
+        "--thresholds",
+        default="0.05,0.1,0.2,0.3,0.4,0.5,0.6,0.7,0.8,0.9,0.95",
+        help="comma list, or start:stop:step",
+    )
+    v_sweep.add_argument(
+        "--band",
+        type=float,
+        default=0.0,
+        help="width of the do-not-decide zone around the threshold (0 = none)",
+    )
+    v_sweep.add_argument(
+        "--blind",
+        action="store_true",
+        help="citation: withhold the capture and judge plausibility from the URL alone; "
+        "scope: withhold the file list and judge from the diff stat alone",
+    )
+    v_sweep.add_argument("--out", help="report directory")
+    v_sweep.set_defaults(_handler=cmd_verify_sweep)
     v_probes = ver_sub.add_parser(
         "probes", help="adversarial probes for a validator's invariants"
     )
@@ -997,6 +1052,131 @@ def cmd_verify_corpus(args: argparse.Namespace) -> int:
     for kind, count in sorted(kinds.items()):
         log.info(f"  - {kind:<20} {count}")
     log.info(f"written: {target}")
+    return EXIT_OK
+
+
+def cmd_verify_sweep(args: argparse.Namespace) -> int:
+    """Plan A: score a per-evidence probability gate across thresholds.
+
+    Separate from `verify eval` on purpose. That command compares matchers that
+    already decided; this one decides *where the boundary should be*, which is
+    the extra step a probability gate buys. The judge proposes a number and the
+    threshold is swept in application code, so the model never sees a label.
+    """
+    log = console()
+    if not args.allow_llm:
+        log.error("verify sweep runs a paid model judge; pass --allow-llm to enable it")
+        return EXIT_FAIL
+
+    if args.criterion == "scope":
+        repo = args.repo or os.environ.get("AGENT_REPO_ROOT") or Path.cwd()
+        corpus = gate_sweep.build_scope_corpus(repo, limit=args.commits, max_per_kind=args.per_kind)
+        if not corpus["samples"]:
+            log.error(f"no commits to build a scope corpus from in {repo}")
+            return EXIT_FAIL
+        log.info(f"scope corpus: {len(corpus['samples'])} samples from {repo}")
+        rule_probs = gate_sweep.scope_rule_probabilities(corpus)
+    else:
+        corpus_path = Path(args.corpus) if args.corpus else verification_eval.default_corpus_path()
+        if corpus_path.is_file():
+            corpus = verification_eval.load_corpus(corpus_path)
+            log.info(f"corpus: {corpus_path} ({len(corpus.get('samples', []))} samples)")
+        else:
+            days = args.days or verification_eval.available_days()
+            if not days:
+                log.error("no corpus and no captures to build one from")
+                return EXIT_FAIL
+            corpus = verification_eval.build_corpus(days)
+            verification_eval.save_corpus(corpus_path, corpus)
+            log.info(f"corpus: built {len(corpus['samples'])} samples -> {corpus_path}")
+        rule_probs = None
+        before = len(corpus.get("samples", []))
+        if args.per_kind:
+            corpus = verification_eval.subsample(corpus, args.per_kind)
+        if len(corpus.get("samples", [])) != before:
+            log.info(f"judge budget: {len(corpus['samples'])}/{before} samples")
+
+    agent_config = config_mod.load()
+    provider = get_provider(agent_config)
+    ok, detail = provider.available()
+    if not ok:
+        log.error(f"judge unavailable: {detail}")
+        return EXIT_FAIL
+
+    def _progress(done: int, total: int) -> None:
+        if done == total or done % 10 == 0:
+            log.info(f"  judging {done}/{total}")
+
+    if args.criterion == "scope":
+        judge = gate_sweep.scope_probability_judge(provider, lossy=args.blind)
+        probs = gate_sweep.scope_probabilities(corpus, judge, progress=_progress)
+    else:
+        judge = gate_sweep.probability_judge(provider, blind=args.blind)
+        probs = gate_sweep.probabilities(corpus, judge, progress=_progress)
+    thresholds = gate_sweep.parse_thresholds(args.thresholds)
+    if not thresholds:
+        log.error(f"no thresholds parsed from {args.thresholds!r}")
+        return EXIT_FAIL
+    report = gate_sweep.sweep(
+        corpus,
+        probs,
+        thresholds=thresholds,
+        band=args.band,
+        judge_name=provider.name,
+        question=getattr(judge, "question", gate_sweep.DEFAULT_QUESTION),
+        blind=args.blind,
+        usage=getattr(judge, "usage", None),
+    )
+    report["criterion"] = args.criterion
+    report["blind_or_lossy"] = bool(args.blind)
+    if rule_probs is not None:
+        # The deterministic baseline, scored through the same path so the
+        # comparison is the same code and not a second implementation.
+        report["rule"] = gate_sweep.score_at(corpus, rule_probs, threshold=0.5)
+    outdir = (
+        Path(args.out)
+        if args.out
+        else paths.runs_dir()
+        / "verification"
+        / f"gate-sweep-{args.criterion}-{dt.datetime.now():%Y%m%d-%H%M%S}"
+    )
+    outdir.mkdir(parents=True, exist_ok=True)
+    (outdir / "report.md").write_text(gate_sweep.markdown(report), encoding="utf-8")
+    # The judge calls are the expensive part; keep them so the curve can be
+    # re-drawn at other thresholds for free.
+    (outdir / "probabilities.json").write_text(
+        json.dumps(probs, ensure_ascii=False, indent=2), encoding="utf-8"
+    )
+    (outdir / "report.json").write_text(
+        json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8"
+    )
+    rule = report.get("rule")
+    if rule is not None:
+        log.info(
+            f"  规则基线(t=0.5) 漏检={rule['false_pass_rate']:.1%} "
+            f"误杀={rule['false_fail_rate']:.1%} 弃权={rule['cannot_verify_rate']:.1%}"
+        )
+    for point in report["points"]:
+        fpr, ffr, cvr = (
+            point["false_pass_rate"],
+            point["false_fail_rate"],
+            point["cannot_verify_rate"],
+        )
+        log.info(
+            f"  t={point['threshold']:.2f} "
+            f"漏检={'—' if fpr is None else f'{fpr:.1%}'} "
+            f"误杀={'—' if ffr is None else f'{ffr:.1%}'} "
+            f"弃权={'—' if cvr is None else f'{cvr:.1%}'}"
+        )
+    chosen = gate_sweep.operating_point(report)
+    if chosen is None:
+        log.error("no threshold reaches zero false passes: this gate needs the rule layer")
+    else:
+        log.info(
+            f"推荐工作点：t={chosen['threshold']:.2f} "
+            f"(漏检={chosen['false_pass_rate']:.1%}, 误杀={chosen['false_fail_rate']:.1%})"
+        )
+    log.info(f"report: {outdir / 'report.md'}")
     return EXIT_OK
 
 

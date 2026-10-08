@@ -634,12 +634,19 @@ def typed_matcher(url: str, known: set[str]) -> str:
     return classify_url(url, known).decision.value
 
 
-def llm_matcher(provider: Any, *, max_tokens: int = 8) -> Callable[[str, set[str]], str]:
+def llm_matcher(provider: Any, *, max_tokens: int = 512) -> Callable[[str, set[str]], str]:
     """Build a matcher backed by a chat provider.
 
     This is the LLM-as-judge baseline the industry is moving away from. It is
     wired the same way as the others so it lands in the same table — but it is
     never selected unless the caller passes --allow-llm.
+
+    The token budget is deliberately generous. A reasoning model spends output
+    tokens thinking before it writes anything, so a small cap leaves ``content``
+    empty and the whole baseline silently reports "cannot verify" for every
+    sample — a judge that never answers looks like a cautious judge but is
+    really a broken one. Measured 2026-10-08 with ``deepseek-flash``: at
+    ``max_tokens=8`` every call returned an empty string.
     """
 
     usage: dict[str, Any] = {

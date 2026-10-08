@@ -53,6 +53,7 @@ python3 -m unittest discover -t . -s tests -v
 ./agent verify content
 ./agent verify selection --sample 100      # 生成待标注清单；填完 gold 后再 --score
 ./agent verify release                     # 发布闸门（blog/tools/deploy.sh 会调用它）
+./agent verify sweep --blind --per-kind 8 --allow-llm   # Plan A：概率门 × 阈值扫描（会付费）
 ```
 
 `-t .` 是必需的：测试用相对导入（`from .helpers import ...`），不指定顶层目录会直接
