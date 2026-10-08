@@ -22,17 +22,14 @@ from pathlib import Path
 from harness import validators
 
 REPO = Path(__file__).resolve().parent.parent
-#: 工具仓库的位置。变异测试会把本仓库复制到 /tmp 下跑，那时 REPO.parent 里没有
-#: daily-trends —— 于是 CoverageTests 会被整体 skip，变异测试看起来「全绿」。
-#: 加一个绝对路径兜底，保证复制出去的副本仍然真的执行这些用例。
-_TOOLS_CANDIDATES = (
-    REPO.parent / "daily-trends",
-    Path("/Users/simon-zj/Documents/ChatGPT/daily-trends"),
-)
-TOOLS_SOURCE = next(
-    (path for path in _TOOLS_CANDIDATES if (path / "tools" / "brief.py").is_file()),
-    _TOOLS_CANDIDATES[0],
-)
+#: 真实工具仓库，可能不存在（CI、把仓库复制到 /tmp 跑变异测试时都不存在）。
+#: CoverageTests 需要真的 interests.json，所以它按这个路径决定 skip。
+#: 这里**不再加绝对路径兜底**：以前那句 `Path("/Users/simon-zj/...")` 让用例
+#: 只在作者本机通过，CI 从 5197185 起连续 9 个提交全红。
+REAL_TOOLS_SOURCE = REPO.parent / "daily-trends"
+#: 发布闸门用例只关心「闸门怎么反应」，不关心速读怎么选，所以用仓库内的契约替身，
+#: 任何机器上都能跑（含 CI）。替身的契约见 tests/fixtures/daily-trends-tools/。
+FIXTURE_TOOLS = REPO / "tests" / "fixtures" / "daily-trends-tools"
 
 
 def _item(title: str, sources: list[int]) -> dict:
@@ -203,7 +200,7 @@ class ReleaseGateTests(unittest.TestCase):
         # 那个相对路径指向不存在的目录，brief/depth/coverage 会全部 CANNOT_VERIFY，
         # 于是 release 用例在副本里必然红（与被测变异无关）。显式给定工具仓库路径，
         # 让这些用例只对被测行为敏感。
-        self.env["DAILY_TRENDS_DIR"] = str(TOOLS_SOURCE)
+        self.env["DAILY_TRENDS_DIR"] = str(FIXTURE_TOOLS)
 
     def tearDown(self) -> None:
         self._tmp.cleanup()
@@ -292,7 +289,7 @@ class ReleaseTargetTests(unittest.TestCase):
         self.env = dict(os.environ)
         self.env["DAILY_TRENDS_DATA_DIR"] = str(self.root)
         self.env["PYTHONPATH"] = str(REPO)
-        self.env["DAILY_TRENDS_DIR"] = str(TOOLS_SOURCE)
+        self.env["DAILY_TRENDS_DIR"] = str(FIXTURE_TOOLS)
 
     def tearDown(self) -> None:
         self._tmp.cleanup()
@@ -356,7 +353,7 @@ class SitemapApplicabilityTests(unittest.TestCase):
 
 
 @unittest.skipUnless(
-    (TOOLS_SOURCE / "tools" / "brief.py").is_file(),
+    (REAL_TOOLS_SOURCE / "tools" / "brief.py").is_file(),
     "requires the sibling daily-trends checkout",
 )
 class CoverageTests(unittest.TestCase):
@@ -373,9 +370,9 @@ class CoverageTests(unittest.TestCase):
         self.tools = self.root / "tools-checkout"
         (self.tools / "tools").mkdir(parents=True)
         (self.tools / "config").mkdir(parents=True)
-        shutil.copy(TOOLS_SOURCE / "tools" / "brief.py", self.tools / "tools" / "brief.py")
+        shutil.copy(REAL_TOOLS_SOURCE / "tools" / "brief.py", self.tools / "tools" / "brief.py")
         shutil.copy(
-            TOOLS_SOURCE / "config" / "interests.json",
+            REAL_TOOLS_SOURCE / "config" / "interests.json",
             self.tools / "config" / "interests.json",
         )
 
