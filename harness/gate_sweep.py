@@ -77,21 +77,33 @@ ABSTAIN = None
 
 
 def parse_thresholds(text: str) -> list[float]:
-    """Parse "0.1,0.3,0.5" (or a start:stop:step range) into sorted thresholds."""
+    """Parse "0.1,0.3,0.5" (or a start:stop:step range) into sorted thresholds.
+
+    A step of zero used to spin forever (`0:1:0`), and a non-number used to
+    escape as a bare ``ValueError`` traceback. Both are operator input, so both
+    must come back as a clean error.
+    """
     text = (text or "").strip()
     if not text:
         return []
-    if ":" in text and "," not in text:
-        start_s, stop_s, step_s = (text.split(":") + ["1"])[:3]
-        start, step = float(start_s), float(step_s or 1)
-        stop = float(stop_s)
-        out: list[float] = []
-        value = start
-        while value <= stop + 1e-9:
-            out.append(round(value, 4))
-            value += step
-        return out
-    values = [float(part) for part in text.split(",") if part.strip()]
+    try:
+        if ":" in text and "," not in text:
+            start_s, stop_s, step_s = (text.split(":") + ["1"])[:3]
+            start, step = float(start_s), float(step_s or 1)
+            stop = float(stop_s)
+            if step <= 0:
+                raise ValueError("step must be greater than zero")
+            out: list[float] = []
+            value = start
+            while value <= stop + 1e-9:
+                out.append(round(value, 4))
+                value += step
+            return out
+        values = [float(part) for part in text.split(",") if part.strip()]
+    except ValueError as exc:
+        raise HarnessError(
+            f"bad --thresholds {text!r}: {exc}. Use 0.1,0.3,0.5 or 0:1:0.1"
+        ) from exc
     return sorted({round(v, 4) for v in values})
 
 
@@ -168,14 +180,28 @@ def probability_judge(
 
 
 def _parse_probability(text: str) -> float | None:
-    """Read one integer 0-100 out of the reply. Anything else abstains."""
-    match = re.search(r"\d{1,3}", text)
+    """Read one probability out of the reply. Anything else abstains.
+
+    The first version took ``\\d{1,3}`` and divided by 100. That turned the
+    nonsense reply "1000" into 1.0 -- maximum confidence -- and the perfectly
+    reasonable reply "0.95" into 0.0, the strongest possible *negative*. A judge
+    that answers on a 0-1 scale is not a judge that says "certainly false".
+    """
+    # Anchor on both sides: without `(?!\d)` the "1000" case still matches "100"
+    # and reports maximum confidence.
+    match = re.search(r"(?<!\d)(\d{1,3}(?:\.\d+)?)(?!\d)", text)
     if not match:
         return None
-    value = int(match.group())
-    if value > 100:
+    token = match.group()
+    if "." in token:
+        value = float(token)
+        if 0.0 <= value <= 1.0:
+            return round(value, 4)
         return None
-    return round(value / 100.0, 4)
+    value = int(token)
+    if 0 <= value <= 100:
+        return round(value / 100.0, 4)
+    return None
 
 
 def probabilities(
@@ -479,14 +505,48 @@ def _wrongness(cost: dict[str, int]) -> tuple[int, int]:
     return cost["leak"], cost["legit_fail"] + cost["legit_abstain"]
 
 
+def _has_both_classes(corpus: dict[str, Any]) -> bool:
+    return len({s.get("expect") for s in corpus.get("samples", [])}) == 2
+
+
+def split_corpus(corpus: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Deterministic two-way split by sample id.
+
+    Deterministic on purpose: the point of the split is that the *threshold* is
+    picked on one half and the *cost* is counted on the other, not that a rerun
+    shuffles the answer.
+    """
+    import hashlib
+
+    left: list[dict[str, Any]] = []
+    right: list[dict[str, Any]] = []
+    for sample in corpus.get("samples", []):
+        digest = hashlib.sha1(str(sample.get("sample_id", "")).encode("utf-8")).digest()
+        (left if digest[0] % 2 == 0 else right).append(sample)
+    days = corpus.get("days", [])
+    return {"days": days, "samples": left}, {"days": days, "samples": right}
+
+
+def _probabilities_from(report: dict[str, Any]) -> dict[str, float | None]:
+    points = report.get("points") or []
+    if not points:
+        return {}
+    return {row["sample_id"]: row.get("probability") for row in points[0].get("verdicts", [])}
+
+
 def recommendation(report: dict[str, Any]) -> dict[str, Any]:
     """Turn the measurement into the decision it was run for: model or rule?
 
     Not "how accurate is the judge" but "should this gate be a model at all".
-    The comparison is made at each side's honest point -- the judge at its
-    lowest leak-free threshold, never at one picked after seeing the labels --
-    and it weighs leaks against *blocked real work*, not against raw verdict
-    counts.
+    It weighs leaks against *blocked real work*, not against raw verdict counts,
+    and it compares the two sides out of sample: the judge's threshold is chosen
+    on one half of the corpus and its cost is counted on the other. Picking the
+    threshold and the cost on the same samples gave the judge N thresholds worth
+    of hindsight while the rule stayed fixed at 0.50 -- measured, that inflates
+    judge_wins by roughly ten times (62 same-corpus wins vs 6 out of sample).
+
+    When the corpus is too small to split it says so and falls back to the
+    in-sample point, marked as such.
     """
     metrics = report.get("metrics") or {}
     separation = metrics.get("separation") or {}
@@ -501,17 +561,46 @@ def recommendation(report: dict[str, Any]) -> dict[str, Any]:
             "auc": auc,
         }
 
-    clean = operating_point(report)
-    judge_point = clean if clean is not None else best_point(report)
+    probs = _probabilities_from(report)
+    rule_probs = frozen_rule_probabilities(report) or {}
+    corpus = report.get("corpus") or {}
+    thresholds = [point["threshold"] for point in report.get("points", [])]
+
+    basis = "同语料内（样本太少，无法留出）"
+    holdout = False
+    judge_point: dict[str, Any] | None = None
+    rule_point = rule
+    if corpus.get("samples") and thresholds:
+        left, right = split_corpus(corpus)
+        if _has_both_classes(left) and _has_both_classes(right):
+            picks = [score_at(left, probs, threshold=t) for t in thresholds]
+            clean_left = [p for p in picks if p.get("false_pass_rate") == 0.0]
+            chosen = (
+                min(clean_left, key=lambda p: p["threshold"])
+                if clean_left
+                else best_point({"points": picks}) or picks[-1]
+            )
+            judge_point = score_at(right, probs, threshold=chosen["threshold"])
+            rule_point = score_at(right, rule_probs, threshold=0.5)
+            holdout = True
+            basis = (
+                f"留出：阈值在另一半选（t={chosen['threshold']:.2f}，"
+                f"{len(left['samples'])}/{len(right['samples'])} 条），成本在这一半算"
+            )
     if judge_point is None:
-        return {"verdict": "no_point", "reasons": ["曲线为空"], "auc": auc}
+        clean = operating_point(report)
+        judge_point = clean if clean is not None else best_point(report)
+    if judge_point is None:
+        return {
+            "verdict": "no_point",
+            "reasons": ["这条语料算不出结论（缺一类样本，或曲线为空）"],
+            "auc": auc,
+            "holdout": holdout,
+        }
 
     judge_cost = cost_profile(judge_point)
-    rule_cost = cost_profile(rule)
-    reasons: list[str] = [
-        f"模型取 {'最低零漏检阈值' if clean is not None else '曲线最宽松点'} "
-        f"t={judge_point['threshold']:.2f}；规则取 t=0.50"
-    ]
+    rule_cost = cost_profile(rule_point)
+    reasons: list[str] = [basis, "模型 t=%.2f；规则 t=0.50" % judge_point["threshold"]]
 
     if auc is not None and auc < 0.6:
         reasons.append(f"可分性 AUC={auc:.3f}：没有任何阈值能分开两类")
@@ -541,6 +630,7 @@ def recommendation(report: dict[str, Any]) -> dict[str, Any]:
         "verdict": verdict,
         "reasons": reasons,
         "auc": auc,
+        "holdout": holdout,
         "judge_threshold": judge_point["threshold"],
         "judge_cost": judge_cost,
         "rule_cost": rule_cost,
@@ -628,7 +718,7 @@ def markdown(report: dict[str, Any]) -> str:
             f"漏检 {best['false_pass_rate']:.1%} / 误杀 {best['false_fail_rate']:.1%}"
         )
     versus = metrics.get("judge_vs_rule")
-    if versus is not None:
+    if versus is not None and versus.get("agreement") is not None:
         lines.append(
             f"- 相对规则：一致 {versus['agreement']:.1%}"
             f"（判断者多判 {versus['judge_only_decided']} 条、规则多判 {versus['rule_only_decided']} 条）"
@@ -666,6 +756,7 @@ def markdown(report: dict[str, Any]) -> str:
             "judge_wins": "结论：**这回模型门赢**",
             "unusable": "结论：**这条门不可用**（概率是噪声）",
             "no_rule_baseline": "结论：**没有规则基线，只能答「准不准」**",
+            "no_point": "结论：**这条语料算不出结论**（缺一类样本或曲线为空）",
         }.get(advice.get("verdict"), f"结论：{advice.get('verdict')}")
         lines.append("")
         lines.append(label)
@@ -799,6 +890,19 @@ def samples_from_commits(
 
 
 def _run_git(repo: str | Any, args: list[str]) -> str:
+    """Read git history. Read-only by construction, and only ``log``.
+
+    AGENTS.md §1 routes new capabilities through the tool layer so that anything
+    touching the world declares its permissions. This one is a deliberate,
+    bounded exception: `verify sweep --criterion scope` is an offline measurement
+    command, not a task step, and the only thing it may ask git for is history
+    (`log --numstat`). Widening that is a one-line change someone has to make on
+    purpose, which is the point of the guard below.
+    """
+    if not args or args[0] != "log":
+        raise HarnessError(
+            f"gate_sweep may only read git history, refused: git {' '.join(args)}"
+        )
     try:
         proc = subprocess.run(
             ["git", *args],
@@ -974,9 +1078,28 @@ def rule_probabilities(
         if not samples or not all("declared" in s and "changed" in s for s in samples):
             return None
         return scope_rule_probabilities(corpus)
-    if not samples or not all("url" in s and "day" in s for s in samples):
+    # Values, not just keys: a corpus rebuilt from an old report has the keys
+    # with empty strings, which used to send `_raw_urls("")` looking for
+    # `raw/.json` and report a missing file instead of "not comparable".
+    if not samples or not all(s.get("url") and s.get("day") for s in samples):
         return None
     return citation_rule_probabilities(corpus, root=root)
+
+
+def frozen_rule_probabilities(report: dict[str, Any]) -> dict[str, float | None] | None:
+    """The rule baseline as it was *measured*, not as it would measure today.
+
+    Reuse used to recompute the rule against whatever is on disk now, while the
+    judge's probabilities stayed frozen. The capture on disk does change (2026-09-22
+    was overwritten by a dry-run, which this repo still documents), so the same
+    report could flip from rule_wins to judge_wins with zero model calls. A
+    comparison between a frozen side and a live side is not a comparison.
+    """
+    rule = report.get("rule") or {}
+    verdicts = rule.get("verdicts") or []
+    if not verdicts:
+        return None
+    return {row["sample_id"]: row.get("probability") for row in verdicts}
 
 
 __all__ = [
@@ -989,6 +1112,7 @@ __all__ = [
     "citation_rule_probabilities",
     "commits_in",
     "corpus_from_report",
+    "frozen_rule_probabilities",
     "best_point",
     "cost_profile",
     "degeneracy_stats",

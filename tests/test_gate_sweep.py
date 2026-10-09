@@ -12,6 +12,7 @@ from __future__ import annotations
 import unittest
 
 from harness import gate_sweep as gs
+from harness.errors import HarnessError
 from harness.providers.base import ChatResponse
 
 
@@ -391,6 +392,84 @@ class RecommendationTest(unittest.TestCase):
     def test_markdown_states_the_verdict(self) -> None:
         text = gs.markdown(self._report(self._JUDGE_OK, self._RULE_OK))
         self.assertIn("用规则，不要用模型门", text)
+
+
+class ReviewRegressionTest(unittest.TestCase):
+    """Every test here pins a defect an independent review found and reproduced.
+
+    They are grouped so the next reader can see what the review actually cost:
+    a hang, a fail-open parse, a silently changing verdict, and an in-sample
+    threshold that flattered the judge.
+    """
+
+    def test_zero_step_is_an_error_not_a_hang(self) -> None:
+        with self.assertRaises(HarnessError):
+            gs.parse_thresholds("0:1:0")
+
+    def test_non_numeric_thresholds_are_a_clean_error(self) -> None:
+        with self.assertRaises(HarnessError):
+            gs.parse_thresholds("abc")
+
+    def test_out_of_range_reply_abstains_instead_of_reading_as_max_confidence(self) -> None:
+        # "1000" used to match the first three digits and become 1.0.
+        self.assertIsNone(gs._parse_probability("1000"))
+
+    def test_reply_on_the_zero_to_one_scale_is_read_as_a_fraction(self) -> None:
+        # "0.95" used to match "0" and become 0.0 -- the strongest possible no.
+        self.assertEqual(gs._parse_probability("0.95"), 0.95)
+
+    def test_rule_baseline_needs_values_not_just_keys(self) -> None:
+        # A corpus rebuilt from an old report has the keys with empty strings,
+        # which used to send _raw_urls("") after raw/.json.
+        thin = {
+            "days": ["t"],
+            "samples": [{"sample_id": "x", "kind": "legit", "expect": "pass", "url": "", "day": ""}],
+        }
+        self.assertIsNone(gs.rule_probabilities("citation", thin))
+
+    def test_frozen_rule_baseline_is_none_without_a_rule(self) -> None:
+        self.assertIsNone(gs.frozen_rule_probabilities({"points": []}))
+
+    def test_frozen_rule_baseline_reads_the_measured_values(self) -> None:
+        report = {"rule": {"verdicts": [{"sample_id": "x", "probability": 1.0}]}}
+        self.assertEqual(gs.frozen_rule_probabilities(report), {"x": 1.0})
+
+    def test_split_is_deterministic_and_covers_every_sample(self) -> None:
+        corpus = {
+            "days": ["t"],
+            "samples": [_sample(f"s{i}", "legit", "pass") for i in range(10)],
+        }
+        left_a, right_a = gs.split_corpus(corpus)
+        left_b, right_b = gs.split_corpus(corpus)
+        self.assertEqual(left_a["samples"], left_b["samples"])
+        self.assertEqual(len(left_a["samples"]) + len(right_a["samples"]), 10)
+
+    def test_recommendation_uses_a_holdout_when_it_can(self) -> None:
+        samples = [_sample(f"l{i}", "legit", "pass") for i in range(8)]
+        samples += [_sample(f"a{i}", "attack", "not_pass") for i in range(8)]
+        corpus = {"days": ["t"], "samples": samples}
+        probs = {s["sample_id"]: (0.9 if s["expect"] == "pass" else 0.1) for s in samples}
+        rule = {s["sample_id"]: (1.0 if s["expect"] == "pass" else 0.0) for s in samples}
+        report = gs.sweep(corpus, probs, thresholds=[0.05, 0.5, 0.9], rule_probs=rule)
+        self.assertTrue(report["recommendation"]["holdout"])
+        self.assertTrue(any("留出" in r for r in report["recommendation"]["reasons"]))
+
+    def test_recommendation_says_so_when_it_cannot_hold_out(self) -> None:
+        # Two samples split into two one-class halves, so no honest split exists.
+        corpus = {
+            "days": ["t"],
+            "samples": [_sample("l", "legit", "pass"), _sample("a", "attack", "not_pass")],
+        }
+        report = gs.sweep(
+            corpus,
+            {"l": 0.9, "a": 0.1},
+            thresholds=[0.05, 0.5],
+            rule_probs={"l": 1.0, "a": 0.0},
+        )
+        self.assertFalse(report["recommendation"]["holdout"])
+        self.assertTrue(
+            any("同语料" in r for r in report["recommendation"]["reasons"])
+        )
 
 
 if __name__ == "__main__":

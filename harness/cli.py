@@ -1097,7 +1097,7 @@ def _log_sweep(log: Any, report: dict[str, Any]) -> None:
             f"（{degeneracy['extreme_share']:.1%}），弃权 {degeneracy['abstained']} 条"
         )
     versus = metrics.get("judge_vs_rule")
-    if versus is not None:
+    if versus is not None and versus.get("agreement") is not None:
         log.info(
             f"  相对规则：一致 {versus['agreement']:.1%}"
             f"（判断者多判 {versus['judge_only_decided']}，规则多判 {versus['rule_only_decided']}）"
@@ -1154,11 +1154,15 @@ def cmd_verify_sweep(args: argparse.Namespace) -> int:
             question=str(previous.get("question") or gate_sweep.DEFAULT_QUESTION),
             blind=bool(previous.get("blind")),
             usage=previous.get("usage"),
-            rule_probs=gate_sweep.rule_probabilities(criterion, corpus),
+            # The rule baseline as it was measured. Recomputing it here would
+            # compare a frozen judge against a live rule -- and the capture on
+            # disk does change, so the same report could flip its verdict.
+            rule_probs=gate_sweep.frozen_rule_probabilities(previous),
         )
         report["criterion"] = criterion
         report["reused_from"] = str(source)
         outdir = Path(args.out) if args.out else source.parent
+        outdir.mkdir(parents=True, exist_ok=True)
         stamp = f"{dt.datetime.now():%Y%m%d-%H%M%S}"
         (outdir / f"report-{stamp}.md").write_text(gate_sweep.markdown(report), encoding="utf-8")
         (outdir / f"report-{stamp}.json").write_text(
